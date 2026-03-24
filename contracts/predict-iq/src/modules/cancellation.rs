@@ -62,8 +62,10 @@ pub fn cancel_market_vote(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     Ok(())
 }
 
-/// Withdraw refund for cancelled market (100% principal, zero fees)
-pub fn withdraw_refund(e: &Env, bettor: Address, market_id: u64) -> Result<i128, ErrorCode> {
+/// Withdraw refund for cancelled market (100% principal, zero fees).
+/// `outcome` identifies which outcome position to refund. Bettors who placed
+/// on multiple outcomes must call this once per outcome to reclaim all funds.
+pub fn withdraw_refund(e: &Env, bettor: Address, market_id: u64, outcome: u32) -> Result<i128, ErrorCode> {
     bettor.require_auth();
     
     let market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
@@ -72,7 +74,7 @@ pub fn withdraw_refund(e: &Env, bettor: Address, market_id: u64) -> Result<i128,
         return Err(ErrorCode::MarketNotActive);
     }
     
-    let bet_key = crate::modules::bets::DataKey::Bet(market_id, bettor.clone());
+    let bet_key = crate::modules::bets::DataKey::Bet(market_id, bettor.clone(), outcome);
     let bet: crate::types::Bet = e.storage().persistent()
         .get(&bet_key)
         .ok_or(ErrorCode::BetNotFound)?;

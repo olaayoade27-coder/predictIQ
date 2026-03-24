@@ -95,6 +95,7 @@ impl PredictIQ {
         e: Env,
         bettor: Address,
         market_id: u64,
+        outcome: u32,
         token_address: Address,
     ) -> Result<i128, ErrorCode> {
         crate::modules::bets::withdraw_refund(&e, bettor, market_id, token_address)

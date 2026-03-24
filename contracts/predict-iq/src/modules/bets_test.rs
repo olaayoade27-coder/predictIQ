@@ -344,3 +344,88 @@ fn test_bet_with_self_referral_rejected() {
     let result = client.try_place_bet(&user, &market_id, &0, &1000, &token, &Some(user.clone()));
     assert_eq!(result, Err(Ok(ErrorCode::InvalidReferrer)));
 }
+
+// ===================== Storage Cleanup / Issue #56 Tests =====================
+
+#[test]
+fn test_withdraw_refund_clears_bet_record() {
+    let (env, client, _admin, user, token) = setup_test_with_token();
+
+    env.ledger().with_mut(|li| li.timestamp = 500);
+
+    let market_id = create_simple_market(&client, &env, &user, &token);
+
+    // Place a bet on outcome 0
+    client.place_bet(&user, &market_id, &0, &1000, &token, &None);
+
+    // Cancel the market
+    client.resolve_market(&market_id, &0); // resolve first so we can test via admin cancel path
+    // Use admin cancel instead
+    // Re-create a fresh market for the cancel path
+    let market_id2 = create_simple_market(&client, &env, &user, &token);
+    client.place_bet(&user, &market_id2, &0, &2000, &token, &None);
+    client.cancel_market_admin(&market_id2);
+
+    // Withdraw refund for outcome 0
+    let refund = client.withdraw_refund(&user, &market_id2, &0, &token);
+    assert_eq!(refund, 2000);
+
+    // Attempting a second refund for the same outcome must fail — record is gone
+    let result = client.try_withdraw_refund(&user, &market_id2, &0, &token);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_withdraw_refund_multi_outcome_no_orphan_data() {
+    let (env, client, _admin, user, token) = setup_test_with_token();
+
+    env.ledger().with_mut(|li| li.timestamp = 500);
+
+    let market_id = create_simple_market(&client, &env, &user, &token);
+
+    // Bettor places on both outcomes — each gets its own storage key
+    client.place_bet(&user, &market_id, &0, &1000, &token, &None);
+    client.place_bet(&user, &market_id, &1, &2000, &token, &None);
+
+    client.cancel_market_admin(&market_id);
+
+    // Refund outcome 0
+    let refund0 = client.withdraw_refund(&user, &market_id, &0, &token);
+    assert_eq!(refund0, 1000);
+
+    // Refund outcome 1 — must still be present (not orphaned, not double-removed)
+    let refund1 = client.withdraw_refund(&user, &market_id, &1, &token);
+    assert_eq!(refund1, 2000);
+
+    // Both records are now gone — any further attempt fails
+    let result0 = client.try_withdraw_refund(&user, &market_id, &0, &token);
+    let result1 = client.try_withdraw_refund(&user, &market_id, &1, &token);
+    assert!(result0.is_err());
+    assert!(result1.is_err());
+}
+
+#[test]
+fn test_bet_key_is_unique_per_outcome() {
+    let (env, client, _admin, user, token) = setup_test_with_token();
+
+    env.ledger().with_mut(|li| li.timestamp = 500);
+
+    let market_id = create_simple_market(&client, &env, &user, &token);
+
+    // Bet on outcome 0 twice — should accumulate
+    client.place_bet(&user, &market_id, &0, &500, &token, &None);
+    client.place_bet(&user, &market_id, &0, &500, &token, &None);
+
+    // Bet on outcome 1 separately
+    client.place_bet(&user, &market_id, &1, &300, &token, &None);
+
+    client.cancel_market_admin(&market_id);
+
+    // Outcome 0 accumulated to 1000
+    let refund0 = client.withdraw_refund(&user, &market_id, &0, &token);
+    assert_eq!(refund0, 1000);
+
+    // Outcome 1 is independent at 300
+    let refund1 = client.withdraw_refund(&user, &market_id, &1, &token);
+    assert_eq!(refund1, 300);
+}

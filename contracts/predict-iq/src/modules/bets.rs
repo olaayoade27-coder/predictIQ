@@ -82,7 +82,7 @@ pub fn place_bet(
         &amount,
     )?;
 
-    let bet_key = DataKey::Bet(market_id, bettor.clone());
+    let bet_key = DataKey::Bet(market_id, bettor.clone(), outcome);
     let mut existing_bet: Bet = e.storage().persistent().get(&bet_key).unwrap_or(Bet {
         market_id,
         bettor: bettor.clone(),
@@ -118,10 +118,10 @@ pub fn place_bet(
     Ok(())
 }
 
-pub fn get_bet(e: &Env, market_id: u64, bettor: Address) -> Option<Bet> {
+pub fn get_bet(e: &Env, market_id: u64, bettor: Address, outcome: u32) -> Option<Bet> {
     e.storage()
         .persistent()
-        .get(&DataKey::Bet(market_id, bettor))
+        .get(&DataKey::Bet(market_id, bettor, outcome))
 }
 
 pub fn claim_winnings(
@@ -188,6 +188,7 @@ pub fn withdraw_refund(
     e: &Env,
     bettor: Address,
     market_id: u64,
+    outcome: u32,
     token_address: Address,
 ) -> Result<i128, ErrorCode> {
     bettor.require_auth();
@@ -198,7 +199,7 @@ pub fn withdraw_refund(
         return Err(ErrorCode::MarketNotActive);
     }
 
-    let bet_key = DataKey::Bet(market_id, bettor.clone());
+    let bet_key = DataKey::Bet(market_id, bettor.clone(), outcome);
     let bet: Bet = e
         .storage()
         .persistent()
@@ -212,7 +213,7 @@ pub fn withdraw_refund(
     e.current_contract_address().require_auth();
     client.transfer(&e.current_contract_address(), &bettor, &refund_amount);
 
-    // Remove bet record
+    // Remove this outcome's bet record — no orphan data left
     e.storage().persistent().remove(&bet_key);
 
     // Emit standardized RewardsClaimed event (refund variant)
