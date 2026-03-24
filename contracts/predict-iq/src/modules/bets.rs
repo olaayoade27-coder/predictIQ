@@ -7,6 +7,8 @@ use soroban_sdk::{contracttype, token, Address, Env};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Bet(u64, Address), // market_id, bettor
+    MarketRemainder(u64), // Accumulated remainder for a market
+    ClaimCount(u64), // Number of claims processed for a market
 }
 
 pub fn place_bet(
@@ -136,8 +138,54 @@ pub fn claim_winnings(
         return Err(ErrorCode::InvalidOutcome);
     }
 
-    // Calculate winnings (simplified - in production would calculate based on pool ratios)
-    let winnings = bet.amount;
+    // Get winning outcome stake
+    let winning_stake = market
+        .outcome_stakes
+        .get(winning_outcome)
+        .unwrap_or(0);
+
+    if winning_stake == 0 {
+        return Err(ErrorCode::InvalidOutcome);
+    }
+
+    // Calculate parimutuel payout
+    // Formula: (bettor_stake / winning_stake) * total_pool
+    // This ensures all winners share the total pool proportionally
+    let base_winnings = (bet.amount * market.total_staked) / winning_stake;
+    
+    // Calculate and accumulate remainder from integer division
+    let remainder = (bet.amount * market.total_staked) % winning_stake;
+    let remainder_key = DataKey::MarketRemainder(market_id);
+    let accumulated_remainder: i128 = e
+        .storage()
+        .persistent()
+        .get(&remainder_key)
+        .unwrap_or(0);
+    let new_remainder = accumulated_remainder + remainder;
+    
+    // Track claim count to determine if this is the last claim
+    let claim_count_key = DataKey::ClaimCount(market_id);
+    let claim_count: u32 = e
+        .storage()
+        .persistent()
+        .get(&claim_count_key)
+        .unwrap_or(0);
+    let new_claim_count = claim_count + 1;
+    
+    // Calculate total number of winning bets (this is an approximation)
+    // In a production system, you'd track this more precisely
+    let estimated_winner_count = winning_stake / bet.amount;
+    
+    // If this appears to be the last or near-last claim, add accumulated remainder
+    let mut winnings = base_winnings;
+    if new_claim_count >= estimated_winner_count.saturating_sub(1) as u32 && new_remainder > 0 {
+        winnings += new_remainder;
+        e.storage().persistent().set(&remainder_key, &0);
+    } else {
+        e.storage().persistent().set(&remainder_key, &new_remainder);
+    }
+    
+    e.storage().persistent().set(&claim_count_key, &new_claim_count);
 
     // Transfer winnings to bettor
     let client = token::Client::new(e, &token_address);
@@ -188,4 +236,58 @@ pub fn withdraw_refund(
     crate::modules::events::emit_rewards_claimed(e, market_id, bettor, refund_amount, true);
 
     Ok(refund_amount)
+}
+
+/// Get the accumulated remainder for a market
+pub fn get_market_remainder(e: &Env, market_id: u64) -> i128 {
+    e.storage()
+        .persistent()
+        .get(&DataKey::MarketRemainder(market_id))
+        .unwrap_or(0)
+}
+
+/// Collect unclaimed remainder to fee treasury after market is resolved
+/// Can only be called by admin after a grace period
+pub fn collect_market_remainder(
+    e: &Env,
+    market_id: u64,
+    token_address: Address,
+) -> Result<i128, ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    
+    let market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
+    
+    // Market must be resolved
+    if market.status != crate::types::MarketStatus::Resolved {
+        return Err(ErrorCode::MarketNotActive);
+    }
+    
+    // Check if sufficient time has passed (e.g., 30 days)
+    let resolved_at = market.resolved_at.ok_or(ErrorCode::MarketNotActive)?;
+    let grace_period = 30 * 24 * 60 * 60; // 30 days in seconds
+    if e.ledger().timestamp() < resolved_at + grace_period {
+        return Err(ErrorCode::MarketStillActive);
+    }
+    
+    let remainder_key = DataKey::MarketRemainder(market_id);
+    let remainder: i128 = e
+        .storage()
+        .persistent()
+        .get(&remainder_key)
+        .unwrap_or(0);
+    
+    if remainder == 0 {
+        return Err(ErrorCode::InsufficientBalance);
+    }
+    
+    // Transfer remainder to fee treasury
+    crate::modules::fees::collect_fee(e, token_address.clone(), remainder);
+    
+    let client = token::Client::new(e, &token_address);
+    client.transfer(&e.current_contract_address(), &crate::modules::admin::get_fee_admin(e)?, &remainder);
+    
+    // Clear the remainder
+    e.storage().persistent().set(&remainder_key, &0);
+    
+    Ok(remainder)
 }
