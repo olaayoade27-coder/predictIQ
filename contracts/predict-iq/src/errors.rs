@@ -55,4 +55,5 @@ pub enum ErrorCode {
     ConfidenceTooLow = 147,
     GovernanceTokenNotSet = 148,
     InsufficientVotingWeight = 149,
+    ResolutionDeadlinePassed = 150,
 }

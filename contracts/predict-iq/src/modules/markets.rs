@@ -48,17 +48,27 @@ pub fn create_market(
             return Err(ErrorCode::InvalidOutcome);
         }
 
-        // Parent must be resolved
-        if parent_market.status != MarketStatus::Resolved {
-            return Err(ErrorCode::ParentMarketNotResolved);
-        }
-
-        // Parent must have resolved to the required outcome
-        let parent_winning_outcome = parent_market
-            .winning_outcome
-            .ok_or(ErrorCode::ParentMarketNotResolved)?;
-        if parent_winning_outcome != parent_outcome_idx {
-            return Err(ErrorCode::ParentMarketInvalidOutcome);
+        // Allow advance creation while the parent is still Active (e.g. tournament
+        // brackets).  If the parent has already resolved, gate on the outcome so we
+        // never create child markets for outcomes that can never be reached.
+        // Any other parent status (PendingResolution, Disputed, Cancelled) is rejected.
+        match parent_market.status {
+            MarketStatus::Active => {
+                // Parent not yet resolved — child created in advance.
+                // Betting on this child is gated at place_bet time.
+            }
+            MarketStatus::Resolved => {
+                let parent_winning_outcome = parent_market
+                    .winning_outcome
+                    .ok_or(ErrorCode::ParentMarketNotResolved)?;
+                if parent_winning_outcome != parent_outcome_idx {
+                    return Err(ErrorCode::ParentMarketInvalidOutcome);
+                }
+            }
+            _ => {
+                // PendingResolution, Disputed, Cancelled — cannot act as a parent.
+                return Err(ErrorCode::ParentMarketNotResolved);
+            }
         }
     }
 
