@@ -111,3 +111,83 @@ pub fn emit_oracle_result_set(e: &Env, market_id: u64, oracle_address: Address, 
         outcome,
     );
 }
+
+/// Emit OracleResolved event (when oracle resolution succeeds)
+/// Topics: [oracle_res, market_id, oracle_address]
+/// Data: (outcome)
+pub fn emit_oracle_resolved(e: &Env, market_id: u64, oracle_address: Address, outcome: u32) {
+    e.events().publish(
+        (symbol_short!("oracle_res"), market_id, oracle_address),
+        outcome,
+    );
+}
+
+/// Emit MarketFinalized event (resolution finalized without dispute)
+/// Topics: [mkt_final, market_id, resolver]
+/// Data: (winning_outcome)
+pub fn emit_market_finalized(e: &Env, market_id: u64, resolver: Address, winning_outcome: u32) {
+    e.events().publish(
+        (symbol_short!("mkt_final"), market_id, resolver),
+        winning_outcome,
+    );
+}
+
+/// Emit DisputeResolved event (voting concluded)
+/// Topics: [disp_resol, market_id, resolver]
+/// Data: (winning_outcome)
+pub fn emit_dispute_resolved(e: &Env, market_id: u64, resolver: Address, winning_outcome: u32) {
+    e.events().publish(
+        (symbol_short!("disp_resol"), market_id, resolver),
+        winning_outcome,
+    );
+}
+
+/// Emit MarketCancelled event (admin cancellation)
+/// Topics: [mkt_cancel, market_id, admin]
+/// Data: ()
+pub fn emit_market_cancelled(e: &Env, market_id: u64, admin: Address) {
+    e.events()
+        .publish((symbol_short!("mkt_cancel"), market_id, admin), ());
+}
+
+/// Emit MarketCancelledVote event (community vote cancellation)
+/// Topics: [mkt_cncl_v, market_id, resolver]
+/// Data: ()
+pub fn emit_market_cancelled_vote(e: &Env, market_id: u64, resolver: Address) {
+    e.events()
+        .publish((symbol_short!("mkt_cncl_v"), market_id, resolver), ());
+}
+
+/// Emit ReferralReward event
+/// Topics: [ref_reward, market_id, referrer]
+/// Data: (amount)
+pub fn emit_referral_reward(e: &Env, market_id: u64, referrer: Address, amount: i128) {
+    e.events()
+        .publish((symbol_short!("ref_reward"), market_id, referrer), amount);
+}
+
+/// Emit ReferralClaimed event
+/// Topics: [ref_claim, market_id, claimer]
+/// Data: (amount)
+pub fn emit_referral_claimed(e: &Env, market_id: u64, claimer: Address, amount: i128) {
+    e.events()
+        .publish((symbol_short!("ref_claim"), market_id, claimer), amount);
+}
+
+/// Emit CircuitBreakerAuto event (automatic trigger)
+/// Topics: [cb_auto, 0 (no market), contract_address]
+/// Data: (error_count)
+pub fn emit_circuit_breaker_auto(e: &Env, contract_address: Address, error_count: u32) {
+    e.events().publish(
+        (symbol_short!("cb_auto"), 0u64, contract_address),
+        error_count,
+    );
+}
+
+/// Emit FeeCollected event
+/// Topics: [fee_colct, 0 (no market), contract_address]
+/// Data: (amount)
+pub fn emit_fee_collected(e: &Env, _market_id: u64, contract_address: Address, amount: i128) {
+    e.events()
+        .publish((symbol_short!("fee_colct"), 0u64, contract_address), amount);
+}

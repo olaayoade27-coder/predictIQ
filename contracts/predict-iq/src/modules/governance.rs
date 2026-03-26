@@ -1,7 +1,7 @@
 use crate::errors::ErrorCode;
 use crate::types::{
-    ConfigKey, Guardian, PendingUpgrade, MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION,
-    GOV_TTL_LOW_THRESHOLD, GOV_TTL_HIGH_THRESHOLD,
+    ConfigKey, Guardian, PendingUpgrade, GOV_TTL_HIGH_THRESHOLD, GOV_TTL_LOW_THRESHOLD,
+    MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION,
 };
 use soroban_sdk::{Address, BytesN, Env, Vec};
 
@@ -316,4 +316,43 @@ pub fn get_upgrade_votes(e: &Env) -> Result<crate::types::UpgradeStats, ErrorCod
         votes_for: pending_upgrade.votes_for.len() as u32,
         votes_against: pending_upgrade.votes_against.len() as u32,
     })
+}
+
+/// Emergency pause triggered by 2/3 Guardian majority (community panic override)
+pub fn emergency_pause(e: &Env, voter: Address) -> Result<(), ErrorCode> {
+    voter.require_auth();
+
+    let guardians = get_guardians(e);
+    if guardians.is_empty() {
+        return Err(ErrorCode::NotAuthorized);
+    }
+
+    // Verify voter is a guardian
+    let mut voter_power: u32 = 0;
+    let mut total_power: u32 = 0;
+    for g in guardians.iter() {
+        total_power += g.voting_power;
+        if g.address == voter {
+            voter_power = g.voting_power;
+        }
+    }
+
+    if voter_power == 0 {
+        return Err(ErrorCode::NotAuthorized);
+    }
+
+    // Check if this guardian's vote alone meets 2/3 threshold
+    let threshold = (total_power * 2) / 3;
+    if voter_power < threshold {
+        return Err(ErrorCode::InsufficientVotes);
+    }
+
+    // Trigger emergency pause
+    e.storage().persistent().set(
+        &ConfigKey::CircuitBreakerState,
+        &crate::types::CircuitBreakerState::Paused,
+    );
+    bump_gov_ttl(e, &ConfigKey::CircuitBreakerState);
+
+    Ok(())
 }

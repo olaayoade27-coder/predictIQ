@@ -26,10 +26,10 @@ pub struct Market {
     pub payout_mode: PayoutMode, // Resolution-time mode flag; payouts are currently claimed via claim_winnings
     pub tier: MarketTier,
     pub creation_deposit: i128,
-    pub parent_id: u64,          // 0 means no parent (independent market)
-    pub parent_outcome_idx: u32, // Required outcome of parent market
-    pub resolved_at: Option<u64>, // Timestamp when market was resolved (for TTL pruning)
-    pub token_address: Address,   // Token used for betting
+    pub parent_id: u64,                 // 0 means no parent (independent market)
+    pub parent_outcome_idx: u32,        // Required outcome of parent market
+    pub resolved_at: Option<u64>,       // Timestamp when market was resolved (for TTL pruning)
+    pub token_address: Address,         // Token used for betting
     pub outcome_stakes: Map<u32, i128>, // Stake per outcome
     pub pending_resolution_timestamp: Option<u64>, // Timestamp when resolution was initiated
     pub dispute_snapshot_ledger: Option<u32>, // Ledger sequence for snapshot voting
@@ -53,11 +53,8 @@ pub enum MarketTier {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CreatorReputation {
-    None,
-    Basic,
-    Pro,
-    Institutional,
+pub struct CreatorReputation {
+    pub score: u32, // Reputation score (0-1000+)
 }
 
 #[contracttype]
@@ -72,11 +69,7 @@ pub struct Bet {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Vote {
-    /// The outcome index this vote is cast for.
     pub outcome: u32,
-    /// Voting weight (token balance at snapshot or locked amount).
-    /// `market_id` and `voter` are omitted — they are already encoded in
-    /// `DataKey::Vote(market_id, voter)` and repeating them wastes gas.
     pub weight: i128,
 }
 
@@ -89,11 +82,15 @@ pub struct LockedTokens {
     pub unlock_time: u64,
 }
 
+/// Issue #16: Added missing fields used in oracles.rs.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OracleConfig {
     pub oracle_address: Address,
     pub feed_id: String,
+    pub min_responses: Option<u32>,
+    pub max_staleness_seconds: u64,
+    pub max_confidence_bps: u64,
     pub min_responses: Option<u32>, // Optimized: None defaults to 1
     pub max_staleness_seconds: i64, // Max age of price data in seconds
     pub max_confidence_bps: u64,    // Max confidence interval in basis points
@@ -130,10 +127,9 @@ pub enum CircuitBreakerState {
     Closed,
     Open,
     HalfOpen,
-    Paused, // Emergency pause state - blocks high-risk operations
+    Paused,
 }
 
-// Governance and Upgrade Types
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Guardian {
@@ -141,6 +137,7 @@ pub struct Guardian {
     pub voting_power: u32,
 }
 
+/// Issue #32: wasm_hash changed from String to BytesN<32>.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingUpgrade {
@@ -150,32 +147,15 @@ pub struct PendingUpgrade {
     pub votes_against: Vec<Address>,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeStats {
-    pub votes_for: u32,
-    pub votes_against: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingGuardianRemoval {
-    pub target_guardian: Address,
-    pub initiated_at: u64,
-    pub votes_for: Vec<Address>,
-}
-
-// Constants for upgrade governance
-pub const TIMELOCK_DURATION: u64 = 48 * 60 * 60; // 48 hours in seconds
-pub const MAJORITY_THRESHOLD_PERCENT: u32 = 51; // 51% for majority
+/// Issue #13: Default timelock — 48 hours. Overridable via ConfigKey::TimelockDuration.
+pub const TIMELOCK_DURATION: u64 = 48 * 60 * 60;
+pub const MAJORITY_THRESHOLD_PERCENT: u32 = 51;
 
 // TTL Management Constants (in ledgers, ~5 seconds per ledger)
-pub const TTL_LOW_THRESHOLD: u32 = 17_280; // ~1 day (86400 seconds / 5)
-pub const TTL_HIGH_THRESHOLD: u32 = 518_400; // ~30 days (2592000 seconds / 5)
+pub const TTL_LOW_THRESHOLD: u32 = 17_280;   // ~1 day
+/// Issue #36: Raised from 30 days to 90 days so data outlives the prune grace period.
+pub const TTL_HIGH_THRESHOLD: u32 = 1_555_200; // ~90 days
 pub const PRUNE_GRACE_PERIOD: u64 = 2_592_000; // 30 days in seconds
 
-/// Governance TTL constants — much longer than market data because governance
-/// processes (upgrades, guardian votes) can span months of inactivity.
-/// ~90 days expressed in ledgers (~5 seconds per ledger).
 pub const GOV_TTL_LOW_THRESHOLD: u32 = 1_555_200;  // ~90 days
 pub const GOV_TTL_HIGH_THRESHOLD: u32 = 3_110_400; // ~180 days

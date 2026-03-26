@@ -8,10 +8,18 @@ fn setup_test_env() -> (Env, Address, soroban_sdk::Address, PredictIQClient<'sta
     e.mock_all_auths();
 
     let admin = Address::generate(&e);
-    let contract_id = e.register_contract(None, PredictIQ);
+    let contract_id = e.register(PredictIQ, ());
     let client = PredictIQClient::new(&e, &contract_id);
 
-    client.initialize(&admin, &100); // 1% fee
+    let init_guardians = {
+        let mut g = soroban_sdk::Vec::new(&e);
+        g.push_back(types::Guardian {
+            address: Address::generate(&e),
+            voting_power: 1,
+        });
+        g
+    };
+    client.initialize(&admin, &100, &init_guardians);
 
     (e, admin, contract_id, client)
 }
@@ -37,6 +45,7 @@ fn create_test_market(
         feed_id: String::from_str(e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -81,6 +90,8 @@ fn test_market_creation_fails_without_deposit() {
             oracle_address: Address::generate(&e),
             feed_id: String::from_str(&e, "test"),
             min_responses: Some(1),
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 200,
         max_staleness_seconds: 3600,
         max_confidence_bps: 100,
         },
@@ -255,9 +266,10 @@ fn test_admin_can_reduce_push_threshold_for_gas_intensive_tokens() {
         types::MarketTier::Basic,
         &native_token,
     );
-    e.storage()
-        .persistent()
-        .set(&crate::modules::voting::DataKey::VoteTally(market_default, 0), &2000i128);
+    e.storage().persistent().set(
+        &crate::modules::voting::DataKey::VoteTally(market_default, 0),
+        &2000i128,
+    );
     client.resolve_market(&market_default, &0);
     let resolved_default = client.get_market(&market_default).unwrap();
     assert_eq!(resolved_default.payout_mode, types::PayoutMode::Push);
@@ -273,9 +285,10 @@ fn test_admin_can_reduce_push_threshold_for_gas_intensive_tokens() {
         types::MarketTier::Basic,
         &native_token,
     );
-    e.storage()
-        .persistent()
-        .set(&crate::modules::voting::DataKey::VoteTally(market_lowered, 0), &2000i128);
+    e.storage().persistent().set(
+        &crate::modules::voting::DataKey::VoteTally(market_lowered, 0),
+        &2000i128,
+    );
     client.resolve_market(&market_lowered, &0);
     let resolved_lowered = client.get_market(&market_lowered).unwrap();
     assert_eq!(resolved_lowered.payout_mode, types::PayoutMode::Pull);
@@ -743,23 +756,23 @@ fn test_get_upgrade_votes() {
     client.initiate_upgrade(&wasm_hash);
 
     // Initial votes should be (0, 0)
-    let stats = client.get_upgrade_votes();
-    assert_eq!(stats.votes_for, 0);
-    assert_eq!(stats.votes_against, 0);
+    let votes = client.get_upgrade_votes();
+    assert_eq!(votes.votes_for, 0);
+    assert_eq!(votes.votes_against, 0);
 
     // One guardian votes for
     client.vote_for_upgrade(&guardian1, &true);
 
-    let stats = client.get_upgrade_votes();
-    assert_eq!(stats.votes_for, 1);
-    assert_eq!(stats.votes_against, 0);
+    let votes = client.get_upgrade_votes();
+    assert_eq!(votes.votes_for, 1);
+    assert_eq!(votes.votes_against, 0);
 
     // Another votes against
     client.vote_for_upgrade(&guardian2, &false);
 
-    let stats = client.get_upgrade_votes();
-    assert_eq!(stats.votes_for, 1);
-    assert_eq!(stats.votes_against, 1);
+    let votes = client.get_upgrade_votes();
+    assert_eq!(votes.votes_for, 1);
+    assert_eq!(votes.votes_against, 1);
 }
 
 #[test]
@@ -826,6 +839,7 @@ fn test_create_conditional_market_parent_not_resolved() {
         feed_id: String::from_str(&e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -877,6 +891,7 @@ fn test_create_conditional_market_parent_wrong_outcome() {
         feed_id: String::from_str(&e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -928,6 +943,7 @@ fn test_create_conditional_market_success() {
         feed_id: String::from_str(&e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -988,6 +1004,7 @@ fn test_place_bet_on_conditional_market_parent_not_resolved() {
         feed_id: String::from_str(&e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -1048,6 +1065,7 @@ fn test_place_bet_on_conditional_market_parent_wrong_outcome() {
         feed_id: String::from_str(&e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -1129,6 +1147,7 @@ fn test_multi_level_conditional_markets() {
         feed_id: String::from_str(&e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -1198,6 +1217,7 @@ fn test_create_conditional_market_invalid_parent_outcome_idx() {
         feed_id: String::from_str(&e, "test_feed"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -1359,7 +1379,10 @@ fn test_pending_upgrade_survives_3_months_inactivity() {
 
     // PendingUpgrade must still be readable — TTL was set to 180 days on write
     let pending = client.get_pending_upgrade();
-    assert!(pending.is_some(), "PendingUpgrade expired after 3 months of inactivity");
+    assert!(
+        pending.is_some(),
+        "PendingUpgrade expired after 3 months of inactivity"
+    );
     assert_eq!(pending.unwrap().wasm_hash, wasm_hash);
 }
 
@@ -1382,7 +1405,11 @@ fn test_guardian_set_survives_3_months_inactivity() {
     });
 
     let stored = client.get_guardians();
-    assert_eq!(stored.len(), 1, "GuardianSet expired after 3 months of inactivity");
+    assert_eq!(
+        stored.len(),
+        1,
+        "GuardianSet expired after 3 months of inactivity"
+    );
     assert_eq!(stored.get(0).unwrap().address, guardian);
 }
 
@@ -1413,7 +1440,7 @@ fn test_vote_on_upgrade_refreshes_ttl() {
 
     let pending = client.get_pending_upgrade();
     assert!(pending.is_some(), "PendingUpgrade expired after vote + 3 months inactivity");
-    let (votes_for, _) = client.get_upgrade_votes().unwrap();
+    let votes_for = client.get_upgrade_votes().votes_for;
     assert_eq!(votes_for, 1);
 }
 
@@ -1464,7 +1491,8 @@ fn test_voting_works_with_optimized_vote_struct() {
     client.attempt_oracle_resolution(&market_id);
 
     let disputer = Address::generate(&e);
-    e.ledger().with_mut(|li| li.timestamp = resolution_deadline + 1000);
+    e.ledger()
+        .with_mut(|li| li.timestamp = resolution_deadline + 1000);
     client.file_dispute(&disputer, &market_id);
 
     // Two voters — outcome 1 gets 70%, outcome 0 gets 30%
@@ -1530,7 +1558,8 @@ fn test_double_vote_still_rejected_with_optimized_struct() {
     client.attempt_oracle_resolution(&market_id);
 
     let disputer = Address::generate(&e);
-    e.ledger().with_mut(|li| li.timestamp = resolution_deadline + 1000);
+    e.ledger()
+        .with_mut(|li| li.timestamp = resolution_deadline + 1000);
     client.file_dispute(&disputer, &market_id);
 
     let voter = Address::generate(&e);
@@ -1542,3 +1571,5 @@ fn test_double_vote_still_rejected_with_optimized_struct() {
     let result = client.try_cast_vote(&voter, &market_id, &1, &5000);
     assert_eq!(result, Err(Ok(crate::errors::ErrorCode::AlreadyVoted)));
 }
+
+
