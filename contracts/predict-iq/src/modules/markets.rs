@@ -3,7 +3,7 @@ use crate::types::{
     ConfigKey, CreatorReputation, Market, MarketStatus, MarketTier, OracleConfig,
     PRUNE_GRACE_PERIOD, TTL_HIGH_THRESHOLD, TTL_LOW_THRESHOLD,
 };
-use soroban_sdk::{contracttype, token, Address, Env, String, Vec};
+use soroban_sdk::{contracttype, symbol_short, token, Address, Env, String, Vec};
 
 #[contracttype]
 pub enum DataKey {
@@ -267,14 +267,25 @@ pub fn set_creation_deposit(e: &Env, amount: i128) -> Result<(), ErrorCode> {
     Ok(())
 }
 
-/// Issue #7: Only release deposit after the dispute window has closed.
-pub fn release_creation_deposit(
+/// Issue #7: Creator must explicitly claim their deposit after finality.
+///
+/// Rules enforced:
+///   1. Caller must be the market creator (auth required).
+///   2. Market must be Resolved.
+///   3. The full dispute window must have elapsed since `pending_resolution_timestamp`
+///      with no successful challenge — i.e. the market must NOT have gone through
+///      the Disputed state (dispute_timestamp is None).
+///   4. Deposit is zeroed after transfer to prevent double-claim.
+pub fn claim_creation_deposit(
     e: &Env,
     market_id: u64,
-    native_token: Address,
 ) -> Result<(), ErrorCode> {
-    let market = get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
+    let mut market = get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 
+    // 1. Only the creator can claim their own deposit
+    market.creator.require_auth();
+
+    // 2. Market must be fully resolved
     if market.status != MarketStatus::Resolved {
         return Err(ErrorCode::MarketNotActive);
     }
@@ -290,15 +301,25 @@ pub fn release_creation_deposit(
         return Err(ErrorCode::DisputeWindowStillOpen);
     }
 
-    if market.creation_deposit > 0 {
-        let amount = market.creation_deposit;
-        let creator = market.creator.clone();
-        let mut market = market;
-        market.creation_deposit = 0;
-        update_market(e, market);
-        let token_client = token::Client::new(e, &native_token);
-        token_client.transfer(&e.current_contract_address(), &creator, &amount);
-    }
+    // 6. Transfer and zero out to prevent double-claim
+    let amount = market.creation_deposit;
+    let creator = market.creator.clone();
+    let token_address = market.token_address.clone();
+    market.creation_deposit = 0;
+    update_market(e, market);
+
+    crate::modules::sac::safe_transfer(
+        e,
+        &token_address,
+        &e.current_contract_address(),
+        &creator,
+        &amount,
+    )?;
+
+    e.events().publish(
+        (soroban_sdk::symbol_short!("dep_claim"), market_id, creator),
+        amount,
+    );
 
     Ok(())
 }

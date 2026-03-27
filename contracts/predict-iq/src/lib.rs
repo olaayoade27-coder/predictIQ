@@ -295,12 +295,13 @@ impl PredictIQ {
         crate::modules::markets::get_creation_deposit(&e)
     }
 
-    pub fn release_creation_deposit(
+    /// Issue #7: Creator explicitly claims their deposit after the dispute window
+    /// closes without a challenge. Reverts if the market was disputed.
+    pub fn claim_creation_deposit(
         e: Env,
         market_id: u64,
-        native_token: Address,
     ) -> Result<(), ErrorCode> {
-        crate::modules::markets::release_creation_deposit(&e, market_id, native_token)
+        crate::modules::markets::claim_creation_deposit(&e, market_id)
     }
 
     // Governance and Upgrade Functions
