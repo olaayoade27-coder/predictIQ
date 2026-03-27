@@ -88,7 +88,7 @@ pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(
 }
 
 pub fn set_max_push_payout_winners(e: &Env, threshold: u32) -> Result<(), ErrorCode> {
-    crate::modules::admin::require_market_admin(e)?;
+    crate::modules::admin::require_admin(e)?;
     e.storage()
         .persistent()
         .set(&ConfigKey::MaxPushPayoutWinners, &threshold);

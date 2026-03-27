@@ -28,7 +28,7 @@ pub fn get_base_fee(e: &Env) -> i128 {
 }
 
 pub fn set_base_fee(e: &Env, amount: i128) -> Result<(), ErrorCode> {
-    admin::require_fee_admin(e)?;
+    admin::require_admin(e)?;
     e.storage().persistent().set(&ConfigKey::BaseFee, &amount);
     bump_config_ttl(e, &ConfigKey::BaseFee);
     Ok(())
@@ -90,27 +90,13 @@ pub fn get_revenue(e: &Env, token: Address) -> i128 {
         .unwrap_or(0)
 }
 
-/// Issue #26: Allow FeeAdmin/Admin to withdraw accumulated protocol fees.
+/// Issue #26: Allow Admin to withdraw accumulated protocol fees.
 pub fn withdraw_protocol_fees(
     e: &Env,
     token: &Address,
     recipient: &Address,
 ) -> Result<i128, ErrorCode> {
-    // Allow either admin or fee_admin to withdraw
-    let is_admin = admin::get_admin(e)
-        .map(|a| {
-            a.try_require_auth().is_ok()
-        })
-        .unwrap_or(false);
-    let is_fee_admin = admin::get_fee_admin(e)
-        .map(|a| {
-            a.try_require_auth().is_ok()
-        })
-        .unwrap_or(false);
-
-    if !is_admin && !is_fee_admin {
-        return Err(ErrorCode::NotAuthorized);
-    }
+    admin::require_admin(e)?;
 
     let key = DataKey::FeeRevenue(token.clone());
     let balance: i128 = e.storage().persistent().get(&key).unwrap_or(0);

@@ -105,8 +105,6 @@ pub const MAX_OUTCOMES_PER_MARKET: u32 = 32;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigKey {
     Admin,
-    MarketAdmin,
-    FeeAdmin,
     GuardianAccount,
     BaseFee,
     CircuitBreakerState,

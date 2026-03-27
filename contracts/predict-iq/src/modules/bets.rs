@@ -259,7 +259,7 @@ pub fn get_minimum_bet_amount(e: &Env) -> i128 {
 }
 
 pub fn set_minimum_bet_amount(e: &Env, amount: i128) -> Result<(), ErrorCode> {
-    crate::modules::admin::require_market_admin(e)?;
+    crate::modules::admin::require_admin(e)?;
     e.storage()
         .persistent()
         .set(&crate::types::ConfigKey::MinimumBetAmount, &amount);
