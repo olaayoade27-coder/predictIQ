@@ -277,6 +277,46 @@ fn test_claim_winnings_twice() {
 }
 
 #[test]
+fn test_claim_winnings_rapid_sequence_same_ledger() {
+    // Stress-test: simulate a repeated-call attack where a bettor fires N claim
+    // attempts within the same ledger timestamp. Only the first must succeed;
+    // every subsequent attempt must be rejected with AlreadyClaimed, and the
+    // user's balance must reflect exactly one payout.
+    const ATTACK_ITERATIONS: u32 = 10;
+
+    let (env, client, _admin, user, token) = setup_test_with_token();
+
+    env.ledger().set_timestamp(500);
+
+    let market_id = create_simple_market(&client, &env, &user, &token);
+
+    let bet_amount: i128 = 1_000;
+    client.place_bet(&user, &market_id, &0, &bet_amount, &token, &None);
+    client.resolve_market(&market_id, &0);
+
+    let token_client = token::Client::new(&env, &token);
+    let balance_before = token_client.balance(&user);
+
+    // First claim must succeed.
+    client.claim_winnings(&user, &market_id);
+
+    // All subsequent attempts in the same ledger must be rejected.
+    for _ in 1..ATTACK_ITERATIONS {
+        let result = client.try_claim_winnings(&user, &market_id);
+        assert_eq!(
+            result,
+            Err(Ok(ErrorCode::AlreadyClaimed)),
+            "expected AlreadyClaimed on repeated call"
+        );
+    }
+
+    // Balance increased by exactly one payout — no double-spend.
+    let balance_after = token_client.balance(&user);
+    // Sole bettor takes the whole pool, so payout == bet_amount.
+    assert_eq!(balance_after - balance_before, bet_amount);
+}
+
+#[test]
 fn test_claim_winnings_no_bet_placed() {
     let (env, client, _admin, _user, _token) = setup_test_with_token();
 
