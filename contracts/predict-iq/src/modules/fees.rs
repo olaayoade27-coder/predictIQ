@@ -130,6 +130,41 @@ pub fn add_referral_reward(e: &Env, referrer: &Address, token: &Address, fee_amo
     crate::modules::events::emit_referral_reward(e, 0, referrer.clone(), reward);
 }
 
+/// Reverse a referral reward that was credited at bet time.
+/// Called during cancellation refund to void rewards from cancelled markets.
+pub fn reverse_referral_reward(e: &Env, referrer: &Address, token: &Address, fee_amount: i128) {
+    let reward = (fee_amount * 10) / 100;
+    if reward == 0 {
+        return;
+    }
+    let key = DataKey::ReferrerBalance(referrer.clone(), token.clone());
+    let balance: i128 = e.storage().persistent().get(&key).unwrap_or(0);
+    let new_balance = balance.saturating_sub(reward);
+    e.storage().persistent().set(&key, &new_balance);
+}
+
+/// Reverse protocol fee revenue that was collected at bet time.
+/// Called during cancellation refund so the fee is returned to the bettor.
+pub fn reverse_fee(e: &Env, token: Address, amount: i128) {
+    if amount == 0 {
+        return;
+    }
+    let key = DataKey::FeeRevenue(token);
+    let total: i128 = e.storage().persistent().get(&key).unwrap_or(0);
+    e.storage()
+        .persistent()
+        .set(&key, &total.saturating_sub(amount));
+
+    let overall: i128 = e
+        .storage()
+        .persistent()
+        .get(&DataKey::TotalFeesCollected)
+        .unwrap_or(0);
+    e.storage()
+        .persistent()
+        .set(&DataKey::TotalFeesCollected, &overall.saturating_sub(amount));
+}
+
 /// Issue #1: Claim referral rewards for a specific token only.
 pub fn claim_referral_rewards(
     e: &Env,

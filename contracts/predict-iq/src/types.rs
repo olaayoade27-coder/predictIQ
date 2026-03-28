@@ -65,7 +65,8 @@ pub struct Bet {
     pub market_id: u64,
     pub bettor: Address,
     pub outcome: u32,
-    pub amount: i128,
+    pub amount: i128,   // net amount after fee (used for payout calculations)
+    pub fee_paid: i128, // protocol fee deducted at bet time (needed for cancellation reversal)
 }
 
 #[contracttype]

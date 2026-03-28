@@ -11,7 +11,7 @@ mod test_tie_handling;
 #[cfg(test)]
 mod test_payout_mode_immutability;
 #[cfg(test)]
-mod test_oracle_overflow;
+mod test_cancellation_referral;
 pub mod types;
 
 pub use errors::ErrorCode;
@@ -103,7 +103,7 @@ impl PredictIQ {
     }
 
     pub fn withdraw_refund(e: Env, bettor: Address, market_id: u64) -> Result<i128, ErrorCode> {
-        crate::modules::cancellation::withdraw_refund(&e, bettor, market_id)
+        crate::modules::cancellation::withdraw_refund(&e, bettor, market_id, 0)
     }
 
     pub fn cancel_market_admin(e: Env, market_id: u64) -> Result<(), ErrorCode> {

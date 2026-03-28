@@ -34,8 +34,9 @@ use soroban_sdk::{contracttype, Address, Env};
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
-    Bet(u64, Address, u32), // market_id, bettor, outcome
-    Claimed(u64, Address),  // market_id, bettor — set after claim
+    Bet(u64, Address, u32),         // market_id, bettor, outcome
+    Claimed(u64, Address),          // market_id, bettor — set after claim
+    BetReferrer(u64, Address, u32), // market_id, bettor, outcome — referrer at bet time
 }
 
 /// Extend the TTL of a bet record to BET_TTL_HIGH_THRESHOLD.
@@ -124,10 +125,12 @@ pub fn place_bet(
         bettor: bettor.clone(),
         outcome,
         amount: 0,
+        fee_paid: 0,
     });
 
     // Store the net (post-fee) amount so the payout formula is always correct.
     existing_bet.amount += net_amount;
+    existing_bet.fee_paid += fee;
     existing_bet.outcome = outcome;
     market.total_staked += net_amount;
 
@@ -152,6 +155,10 @@ pub fn place_bet(
         if fee > 0 {
             crate::modules::fees::add_referral_reward(e, r, &token_address, fee);
         }
+        // Store referrer so cancellation can reverse the reward if needed.
+        let referrer_key = DataKey::BetReferrer(market_id, bettor.clone(), outcome);
+        e.storage().persistent().set(&referrer_key, r);
+        bump_bet_ttl(e, &referrer_key);
     }
 
     // Emit standardized BetPlaced event
@@ -165,6 +172,18 @@ pub fn get_bet(e: &Env, market_id: u64, bettor: Address, outcome: u32) -> Option
     e.storage()
         .persistent()
         .get(&DataKey::Bet(market_id, bettor, outcome))
+}
+
+/// Returns the referrer stored at bet-placement time, if any.
+pub fn get_bet_referrer(e: &Env, market_id: u64, bettor: Address, outcome: u32) -> Option<Address> {
+    let key = DataKey::BetReferrer(market_id, bettor, outcome);
+    e.storage().persistent().get(&key)
+}
+
+/// Removes the referrer record — called during refund to clean up storage.
+pub fn remove_bet_referrer(e: &Env, market_id: u64, bettor: &Address, outcome: u32) {
+    let key = DataKey::BetReferrer(market_id, bettor.clone(), outcome);
+    e.storage().persistent().remove(&key);
 }
 
 fn internal_claim_amount(
