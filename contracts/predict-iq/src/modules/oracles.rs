@@ -215,13 +215,42 @@ pub fn get_last_update(e: &Env, market_id: u64, oracle_id: u32) -> Option<u64> {
         .get(&OracleData::LastUpdate(market_id, oracle_id))
 }
 
+/// Validates that an `OracleConfig` is safe to use before any price fetch.
+///
+/// Checks beyond the previous "feed_id non-empty" guard:
+/// - `feed_id` must be exactly 64 hex characters (32-byte Pyth ID).
+/// - `max_confidence_bps` must be > 0 (zero BPS makes every price fail validation).
+/// - `max_staleness_seconds` must be > 0 (zero window makes every price stale).
 pub fn verify_oracle_health(_e: &Env, config: &OracleConfig) -> bool {
-    !config.feed_id.is_empty()
+    if config.feed_id.len() != 64 {
+        return false;
+    }
+    if config.max_confidence_bps == 0 {
+        return false;
+    }
+    if config.max_staleness_seconds == 0 {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+
+    fn valid_config(e: &Env) -> OracleConfig {
+        OracleConfig {
+            oracle_address: Address::generate(e),
+            feed_id: String::from_str(
+                e,
+                "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+            ),
+            min_responses: Some(1),
+            max_staleness_seconds: 300,
+            max_confidence_bps: 200,
+        }
+    }
 
     #[test]
     fn abs_price_handles_i64_min_without_panic() {
@@ -245,5 +274,75 @@ mod tests {
         assert_eq!(hex_nibble(b'F'), Some(15));
         assert_eq!(hex_nibble(b'g'), None);
         assert_eq!(hex_nibble(b'z'), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // verify_oracle_health — parameter validation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn health_check_passes_for_valid_config() {
+        let e = Env::default();
+        assert!(verify_oracle_health(&e, &valid_config(&e)));
+    }
+
+    #[test]
+    fn health_check_rejects_empty_feed_id() {
+        let e = Env::default();
+        let mut cfg = valid_config(&e);
+        cfg.feed_id = String::from_str(&e, "");
+        assert!(!verify_oracle_health(&e, &cfg));
+    }
+
+    #[test]
+    fn health_check_rejects_short_feed_id() {
+        let e = Env::default();
+        let mut cfg = valid_config(&e);
+        // 32 chars — half the required 64
+        cfg.feed_id = String::from_str(&e, "e62df6c8b4a85fe1a67db44dc12de5db");
+        assert!(!verify_oracle_health(&e, &cfg));
+    }
+
+    #[test]
+    fn health_check_rejects_long_feed_id() {
+        let e = Env::default();
+        let mut cfg = valid_config(&e);
+        // 65 chars — one too many
+        cfg.feed_id = String::from_str(
+            &e,
+            "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b430",
+        );
+        assert!(!verify_oracle_health(&e, &cfg));
+    }
+
+    #[test]
+    fn health_check_rejects_zero_confidence_bps() {
+        let e = Env::default();
+        let mut cfg = valid_config(&e);
+        cfg.max_confidence_bps = 0;
+        assert!(
+            !verify_oracle_health(&e, &cfg),
+            "zero max_confidence_bps makes every price fail validation — must be rejected"
+        );
+    }
+
+    #[test]
+    fn health_check_rejects_zero_staleness_window() {
+        let e = Env::default();
+        let mut cfg = valid_config(&e);
+        cfg.max_staleness_seconds = 0;
+        assert!(
+            !verify_oracle_health(&e, &cfg),
+            "zero max_staleness_seconds makes every price stale — must be rejected"
+        );
+    }
+
+    #[test]
+    fn health_check_rejects_both_zero_bps_and_zero_staleness() {
+        let e = Env::default();
+        let mut cfg = valid_config(&e);
+        cfg.max_confidence_bps = 0;
+        cfg.max_staleness_seconds = 0;
+        assert!(!verify_oracle_health(&e, &cfg));
     }
 }
