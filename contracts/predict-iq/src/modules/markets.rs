@@ -1,9 +1,9 @@
 use crate::errors::ErrorCode;
 use crate::types::{
     ConfigKey, CreatorReputation, Market, MarketStatus, MarketTier, OracleConfig,
-    PRUNE_GRACE_PERIOD, TTL_HIGH_THRESHOLD, TTL_LOW_THRESHOLD,
+    PayoutMode, PRUNE_GRACE_PERIOD, TTL_HIGH_THRESHOLD, TTL_LOW_THRESHOLD,
 };
-use soroban_sdk::{contracttype, symbol_short, token, Address, Env, String, Vec};
+use soroban_sdk::{contracttype, token, Address, Env, String, Vec};
 
 #[contracttype]
 pub enum DataKey {
@@ -11,7 +11,17 @@ pub enum DataKey {
     MarketCount,
     CreatorReputation(Address),
     OutcomeStake(u64, u32), // market_id, outcome
+    OutcomeBetCount(u64, u32),
     Config(ConfigKey),
+}
+
+fn creator_reputation_rank(r: &CreatorReputation) -> u32 {
+    match r {
+        CreatorReputation::None => 0,
+        CreatorReputation::Basic => 1,
+        CreatorReputation::Pro => 2,
+        CreatorReputation::Institutional => 3,
+    }
 }
 
 pub fn create_market(
@@ -83,12 +93,16 @@ pub fn create_market(
     }
 
     let reputation = get_creator_reputation(e, &creator);
-    let base_deposit = get_creation_deposit(e);
-
+    let creation_deposit = get_creation_deposit(e);
     let deposit_required = !matches!(
         reputation,
         CreatorReputation::Pro | CreatorReputation::Institutional
     );
+    let adjusted_deposit = if deposit_required {
+        creation_deposit
+    } else {
+        0
+    };
 
     if adjusted_deposit > 0 {
         let token_client = token::Client::new(e, &native_token);
@@ -98,7 +112,7 @@ pub fn create_market(
             return Err(ErrorCode::InsufficientDeposit);
         }
 
-        token_client.transfer(&creator, &e.current_contract_address(), &creation_deposit);
+        token_client.transfer(&creator, &e.current_contract_address(), &adjusted_deposit);
     }
 
     let count = allocate_market_id(e)?;
@@ -108,7 +122,7 @@ pub fn create_market(
     // Pre-initialize outcome_stakes and bet counts with 0 for all outcomes to optimize gas
     for i in 0..num_outcomes {
         set_outcome_stake(e, count, i, 0);
-        set_outcome_bet_count(e, count, i, 0);
+        set_outcome_bet_count(e, count, i, 0u32);
     }
 
     let market = Market {
@@ -136,6 +150,7 @@ pub fn create_market(
         dispute_timestamp: None,
         // Issue #24: initialize precise winner counter; incremented in place_bet.
         winner_counts: soroban_sdk::Map::new(e),
+        total_claimed: 0,
     };
 
     e.storage()
@@ -230,7 +245,7 @@ pub fn get_creator_reputation(e: &Env, creator: &Address) -> CreatorReputation {
     e.storage()
         .persistent()
         .get(&DataKey::CreatorReputation(creator.clone()))
-        .unwrap_or(CreatorReputation { score: 0 })
+        .unwrap_or(CreatorReputation::None)
 }
 
 pub fn set_creator_reputation(
@@ -243,7 +258,12 @@ pub fn set_creator_reputation(
     e.storage()
         .persistent()
         .set(&DataKey::CreatorReputation(creator.clone()), &reputation);
-    crate::modules::events::emit_creator_reputation_set(e, creator, old.score, reputation.score);
+    crate::modules::events::emit_creator_reputation_set(
+        e,
+        creator,
+        creator_reputation_rank(&old),
+        creator_reputation_rank(&reputation),
+    );
     Ok(())
 }
 
@@ -334,6 +354,35 @@ pub fn bump_market_ttl(e: &Env, market_id: u64) {
     );
 }
 
+pub fn get_outcome_stake(e: &Env, market_id: u64, outcome: u32) -> i128 {
+    e.storage()
+        .persistent()
+        .get(&DataKey::OutcomeStake(market_id, outcome))
+        .unwrap_or(0)
+}
+
+pub fn set_outcome_stake(e: &Env, market_id: u64, outcome: u32, amount: i128) {
+    let key = DataKey::OutcomeStake(market_id, outcome);
+    e.storage().persistent().set(&key, &amount);
+    e.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LOW_THRESHOLD, TTL_HIGH_THRESHOLD);
+}
+
+pub fn set_outcome_bet_count(e: &Env, market_id: u64, outcome: u32, count: u32) {
+    let key = DataKey::OutcomeBetCount(market_id, outcome);
+    e.storage().persistent().set(&key, &count);
+    e.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LOW_THRESHOLD, TTL_HIGH_THRESHOLD);
+}
+
+pub fn increment_outcome_bet_count(e: &Env, market_id: u64, outcome: u32) {
+    let key = DataKey::OutcomeBetCount(market_id, outcome);
+    let n: u32 = e.storage().persistent().get(&key).unwrap_or(0);
+    set_outcome_bet_count(e, market_id, outcome, n + 1);
+}
+
 /// Issue #17: Guard prune with total_claimed check.
 /// Issue #47: Permissionless — anyone can call after grace period.
 pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
@@ -355,6 +404,9 @@ pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     if market.total_claimed < market.total_staked {
         return Err(ErrorCode::InsufficientBalance);
     }
+
+    // Deep prune: dispute/voting keys (per-voter + tally) must not outlive the market.
+    crate::modules::voting::prune_market_voting_state(e, market_id, market.options.len() as u32);
 
     e.storage().persistent().remove(&DataKey::Market(market_id));
 

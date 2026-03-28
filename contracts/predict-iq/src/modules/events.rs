@@ -117,7 +117,7 @@ pub fn emit_oracle_result_set(e: &Env, market_id: u64, oracle_address: Address, 
 /// Data: (outcome)
 pub fn emit_oracle_resolved(e: &Env, market_id: u64, oracle_address: Address, outcome: u32) {
     e.events().publish(
-        (symbol_short!("oracle_res"), market_id, oracle_address),
+        (symbol_short!("orcl_res"), market_id, oracle_address),
         outcome,
     );
 }
@@ -137,7 +137,7 @@ pub fn emit_market_finalized(e: &Env, market_id: u64, resolver: Address, winning
 /// Data: (winning_outcome)
 pub fn emit_dispute_resolved(e: &Env, market_id: u64, resolver: Address, winning_outcome: u32) {
     e.events().publish(
-        (symbol_short!("disp_resol"), market_id, resolver),
+        (symbol_short!("disp_res"), market_id, resolver),
         winning_outcome,
     );
 }
@@ -147,7 +147,7 @@ pub fn emit_dispute_resolved(e: &Env, market_id: u64, resolver: Address, winning
 /// Data: ()
 pub fn emit_market_cancelled(e: &Env, market_id: u64, admin: Address) {
     e.events()
-        .publish((symbol_short!("mkt_cancel"), market_id, admin), ());
+        .publish((symbol_short!("mkt_cncl"), market_id, admin), ());
 }
 
 /// Emit MarketCancelledVote event (community vote cancellation)
@@ -155,7 +155,7 @@ pub fn emit_market_cancelled(e: &Env, market_id: u64, admin: Address) {
 /// Data: ()
 pub fn emit_market_cancelled_vote(e: &Env, market_id: u64, resolver: Address) {
     e.events()
-        .publish((symbol_short!("mkt_cncl_v"), market_id, resolver), ());
+        .publish((symbol_short!("mk_cn_vt"), market_id, resolver), ());
 }
 
 /// Emit ReferralReward event
@@ -163,7 +163,7 @@ pub fn emit_market_cancelled_vote(e: &Env, market_id: u64, resolver: Address) {
 /// Data: (amount)
 pub fn emit_referral_reward(e: &Env, market_id: u64, referrer: Address, amount: i128) {
     e.events()
-        .publish((symbol_short!("ref_reward"), market_id, referrer), amount);
+        .publish((symbol_short!("ref_rwrd"), market_id, referrer), amount);
 }
 
 /// Emit ReferralClaimed event
@@ -181,6 +181,19 @@ pub fn emit_circuit_breaker_auto(e: &Env, contract_address: Address, error_count
     e.events().publish(
         (symbol_short!("cb_auto"), 0u64, contract_address),
         error_count,
+    );
+}
+
+/// Monitoring counters cleared (`reset_monitoring`).
+pub fn emit_monitoring_state_reset(
+    e: &Env,
+    resetter: Address,
+    previous_error_count: u32,
+    previous_last_observation: u64,
+) {
+    e.events().publish(
+        (symbol_short!("mon_reset"), resetter),
+        (previous_error_count, previous_last_observation),
     );
 }
 
@@ -205,7 +218,7 @@ pub fn emit_admin_fallback_resolution(
     winning_outcome: u32,
 ) {
     e.events().publish(
-        (symbol_short!("adm_fallbk"), market_id, admin),
+        (symbol_short!("adm_fbk"), market_id, admin),
         winning_outcome,
     );
 }

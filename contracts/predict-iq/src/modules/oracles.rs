@@ -52,7 +52,7 @@ pub fn fetch_pyth_price(e: &Env, config: &OracleConfig) -> Result<PythPrice, Err
     // The Pyth Soroban contract's `get_price(feed_id: BytesN<32>)` returns
     // a struct with fields (price: i64, conf: u64, expo: i32, publish_time: i64).
     // We map it to our internal PythPrice.
-    let raw: Result<Result<RawPythPrice, _>, _> = e.try_invoke_contract(
+    let raw = e.try_invoke_contract::<RawPythPrice, ErrorCode>(
         &config.oracle_address,
         &Symbol::new(e, "get_price"),
         soroban_sdk::vec![e, feed_id.into()],

@@ -29,9 +29,8 @@ impl PredictIQ {
         admin: Address,
         base_fee: i128,
     ) -> Result<(), ErrorCode> {
-        // Require the deployer's authorization to prevent front-running attacks.
-        // Only the account that deployed this contract can call initialize.
-        e.deployer().require_auth();
+        // Require the admin account to authorize initialize (standard Soroban init pattern).
+        admin.require_auth();
 
         if e.storage().persistent().has(&ConfigKey::Admin) {
             return Err(ErrorCode::AlreadyInitialized);
@@ -110,10 +109,6 @@ impl PredictIQ {
         crate::modules::cancellation::cancel_market_admin(&e, market_id)
     }
 
-    pub fn cancel_market_admin(e: Env, market_id: u64) -> Result<(), ErrorCode> {
-        crate::modules::cancellation::cancel_market_admin(&e, market_id)
-    }
-
     pub fn get_market(e: Env, id: u64) -> Option<crate::types::Market> {
         crate::modules::markets::get_market(&e, id)
     }
@@ -158,11 +153,11 @@ impl PredictIQ {
     }
 
     pub fn set_fee_admin(e: Env, fee_admin: Address) -> Result<(), ErrorCode> {
-        crate::modules::admin::set_fee_admin(&e, fee_admin)
+        crate::modules::fees::set_fee_admin(&e, fee_admin)
     }
 
     pub fn get_fee_admin(e: Env) -> Option<Address> {
-        crate::modules::admin::get_fee_admin(&e)
+        crate::modules::fees::get_fee_admin(&e)
     }
 
     pub fn get_revenue(e: Env, token: Address) -> i128 {

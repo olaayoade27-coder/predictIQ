@@ -1,8 +1,9 @@
 use crate::errors::ErrorCode;
 use crate::modules::{markets, resolution};
 use crate::types::{ConfigKey, MarketStatus, PayoutMode};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{contracttype, Address, Env};
 
+#[contracttype]
 #[derive(Clone)]
 pub struct ResolutionMetrics {
     pub winner_count: u32,
