@@ -95,30 +95,31 @@ impl Default for RateLimiter {
     }
 }
 
-/// Extract client IP from request
+/// Extract client IP from request with strict validation and precedence
 pub fn extract_client_ip(
     headers: &HeaderMap,
     connect_info: Option<&ConnectInfo<std::net::SocketAddr>>,
 ) -> String {
-    // Check X-Forwarded-For header (from proxy/load balancer)
+    // 1. Check X-Forwarded-For header (from proxy/load balancer)
+    // We pick the first valid IP address in the list
     if let Some(forwarded_for) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
-        if let Some(ip) = forwarded_for.split(',').next() {
-            let ip = ip.trim();
-            if !ip.is_empty() {
-                return ip.to_string();
+        for ip_str in forwarded_for.split(',') {
+            let ip_str = ip_str.trim();
+            if !ip_str.is_empty() && ip_str.parse::<IpAddr>().is_ok() {
+                return ip_str.to_string();
             }
         }
     }
 
-    // Check X-Real-IP header
+    // 2. Check X-Real-IP header
     if let Some(real_ip) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
-        let ip = real_ip.trim();
-        if !ip.is_empty() {
-            return ip.to_string();
+        let ip_str = real_ip.trim();
+        if !ip_str.is_empty() && ip_str.parse::<IpAddr>().is_ok() {
+            return ip_str.to_string();
         }
     }
 
-    // Fallback to connection info
+    // 3. Fallback to connection info (Socket)
     if let Some(conn_info) = connect_info {
         return conn_info.0.ip().to_string();
     }
@@ -376,5 +377,73 @@ pub struct SecurityError {
 impl IntoResponse for SecurityError {
     fn into_response(self) -> Response {
         (StatusCode::BAD_REQUEST, Json(self)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_extract_client_ip_precedence() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.1.1.1, 2.2.2.2".parse().unwrap());
+        headers.insert("x-real-ip", "3.3.3.3".parse().unwrap());
+        let addr: SocketAddr = "4.4.4.4:8080".parse().unwrap();
+        let connect_info = ConnectInfo(addr);
+
+        // X-Forwarded-For has absolute precedence
+        assert_eq!(extract_client_ip(&headers, Some(&connect_info)), "1.1.1.1");
+
+        // X-Real-IP is next if X-Forwarded-For is missing
+        headers.remove("x-forwarded-for");
+        assert_eq!(extract_client_ip(&headers, Some(&connect_info)), "3.3.3.3");
+
+        // Socket info is last
+        headers.remove("x-real-ip");
+        assert_eq!(extract_client_ip(&headers, Some(&connect_info)), "4.4.4.4");
+    }
+
+    #[test]
+    fn test_extract_client_ip_validation() {
+        let mut headers = HeaderMap::new();
+        let addr: SocketAddr = "4.4.4.4:8080".parse().unwrap();
+        let connect_info = ConnectInfo(addr);
+
+        // Malformed X-Forwarded-For should be skipped
+        headers.insert("x-forwarded-for", "malformed, 1.1.1.1".parse().unwrap());
+        assert_eq!(extract_client_ip(&headers, Some(&connect_info)), "1.1.1.1");
+
+        // If all X-Forwarded-For are malformed, move to X-Real-IP
+        headers.insert("x-forwarded-for", "not-an-ip, also-bad".parse().unwrap());
+        headers.insert("x-real-ip", "2.2.2.2".parse().unwrap());
+        assert_eq!(extract_client_ip(&headers, Some(&connect_info)), "2.2.2.2");
+
+        // If X-Real-IP is also malformed, fallback to socket
+        headers.insert("x-real-ip", "invalid-ip".parse().unwrap());
+        assert_eq!(extract_client_ip(&headers, Some(&connect_info)), "4.4.4.4");
+    }
+
+    #[test]
+    fn test_extract_client_ip_empty_and_unknown() {
+        let headers = HeaderMap::new();
+        
+        // No headers, no connect info
+        assert_eq!(extract_client_ip(&headers, None), "unknown");
+
+        // Only connect info
+        let addr: SocketAddr = "5.5.5.5:80".parse().unwrap();
+        let connect_info = ConnectInfo(addr);
+        assert_eq!(extract_client_ip(&headers, Some(&connect_info)), "5.5.5.5");
+    }
+
+    #[test]
+    fn test_extract_client_ip_ipv6() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "2001:db8::1, 192.168.1.1".parse().unwrap());
+        
+        assert_eq!(extract_client_ip(&headers, None), "2001:db8::1");
     }
 }
