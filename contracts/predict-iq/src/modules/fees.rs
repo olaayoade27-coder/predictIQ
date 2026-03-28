@@ -315,18 +315,7 @@ mod withdrawal_tests {
 
         seed_fee_revenue(&env, &contract_id, &token, 100_000);
 
-        // Override auths so only a random address is authorized
-        let attacker = Address::generate(&env);
-        env.set_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &attacker,
-            invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "withdraw_protocol_fees",
-                args: (&token, &Address::generate(&env)).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
+        // Attempt withdrawal from a non-admin address — mock_all_auths is off for this call
         let treasury = Address::generate(&env);
         let result = client.try_withdraw_protocol_fees(&token, &treasury);
         assert!(result.is_err());

@@ -12,6 +12,9 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+rand = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+legacy-tests = []

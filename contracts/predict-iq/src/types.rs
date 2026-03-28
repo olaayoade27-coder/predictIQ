@@ -120,6 +120,8 @@ pub enum ConfigKey {
     MinimumBetAmount,
     /// Issue #8: Configurable dispute window duration in seconds.
     DisputeWindow,
+    /// Issue #13: Configurable timelock duration in seconds.
+    TimelockDuration,
 }
 
 #[contracttype]
@@ -150,6 +152,8 @@ pub struct PendingUpgrade {
 
 /// Issue #13: Default timelock — 48 hours.
 pub const TIMELOCK_DURATION: u64 = 48 * 60 * 60;
+pub const TIMELOCK_MIN_SECONDS: u64 = 6 * 60 * 60;   // 6 hours
+pub const TIMELOCK_MAX_SECONDS: u64 = 7 * 24 * 60 * 60; // 7 days
 pub const MAJORITY_THRESHOLD_PERCENT: u32 = 51;
 pub const UPGRADE_COOLDOWN_DURATION: u64 = 7 * 24 * 60 * 60; // 7 days
 
@@ -172,3 +176,20 @@ pub const GOV_TTL_HIGH_THRESHOLD: u32 = 3_110_400; // ~180 days
 
 /// Issue #54: Reserved sentinel index for cancellation votes, distinct from any valid outcome index.
 pub const CANCEL_OUTCOME_INDEX: u32 = u32::MAX;
+
+/// Issue #33: Named struct for upgrade vote statistics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeStats {
+    pub votes_for: u32,
+    pub votes_against: u32,
+}
+
+/// Pending guardian removal proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingGuardianRemoval {
+    pub target_guardian: Address,
+    pub initiated_at: u64,
+    pub votes_for: soroban_sdk::Vec<Address>,
+}

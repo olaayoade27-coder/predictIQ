@@ -1,6 +1,6 @@
 use crate::errors::ErrorCode;
 use crate::types::{
-    ConfigKey, CreatorReputation, Market, MarketStatus, MarketTier, OracleConfig,
+    ConfigKey, CreatorReputation, Market, MarketStatus, MarketTier, OracleConfig, PayoutMode,
     PRUNE_GRACE_PERIOD, TTL_HIGH_THRESHOLD, TTL_LOW_THRESHOLD,
 };
 use soroban_sdk::{contracttype, symbol_short, token, Address, Env, String, Vec};
@@ -10,7 +10,8 @@ pub enum DataKey {
     Market(u64),
     MarketCount,
     CreatorReputation(Address),
-    OutcomeStake(u64, u32), // market_id, outcome
+    OutcomeStake(u64, u32),    // market_id, outcome
+    OutcomeBetCount(u64, u32), // market_id, outcome
     Config(ConfigKey),
 }
 
@@ -85,16 +86,15 @@ pub fn create_market(
     let reputation = get_creator_reputation(e, &creator);
     let base_deposit = get_creation_deposit(e);
 
-    let deposit_required = !matches!(
-        reputation,
-        CreatorReputation::Pro | CreatorReputation::Institutional
-    );
+    let deposit_required = !matches!(reputation.score, score if score >= 500);
 
-    if adjusted_deposit > 0 {
+    let creation_deposit = if deposit_required { base_deposit } else { 0 };
+
+    if creation_deposit > 0 {
         let token_client = token::Client::new(e, &native_token);
         let balance = token_client.balance(&creator);
 
-        if balance < adjusted_deposit {
+        if balance < creation_deposit {
             return Err(ErrorCode::InsufficientDeposit);
         }
 
@@ -125,7 +125,7 @@ pub fn create_market(
         // Issue #23: payout_mode is immutable after creation
         payout_mode: PayoutMode::Pull,
         tier,
-        creation_deposit: if deposit_required { creation_deposit } else { 0 },
+        creation_deposit,
         parent_id,
         parent_outcome_idx,
         resolved_at: None,
@@ -136,6 +136,7 @@ pub fn create_market(
         dispute_timestamp: None,
         // Issue #24: initialize precise winner counter; incremented in place_bet.
         winner_counts: soroban_sdk::Map::new(e),
+        total_claimed: 0,
     };
 
     e.storage()
@@ -215,6 +216,36 @@ pub fn update_market(e: &Env, market: Market) {
     e.storage()
         .persistent()
         .set(&DataKey::Market(market.id), &market);
+}
+
+pub fn get_outcome_stake(e: &Env, market_id: u64, outcome: u32) -> i128 {
+    e.storage()
+        .persistent()
+        .get(&DataKey::OutcomeStake(market_id, outcome))
+        .unwrap_or(0)
+}
+
+pub fn set_outcome_stake(e: &Env, market_id: u64, outcome: u32, value: i128) {
+    e.storage()
+        .persistent()
+        .set(&DataKey::OutcomeStake(market_id, outcome), &value);
+}
+
+pub fn set_outcome_bet_count(e: &Env, market_id: u64, outcome: u32, value: u32) {
+    e.storage()
+        .persistent()
+        .set(&DataKey::OutcomeBetCount(market_id, outcome), &value);
+}
+
+pub fn increment_outcome_bet_count(e: &Env, market_id: u64, outcome: u32) {
+    let current: u32 = e
+        .storage()
+        .persistent()
+        .get(&DataKey::OutcomeBetCount(market_id, outcome))
+        .unwrap_or(0);
+    e.storage()
+        .persistent()
+        .set(&DataKey::OutcomeBetCount(market_id, outcome), &(current + 1));
 }
 
 /// Issue #14: Proper winner count using the maintained counter.

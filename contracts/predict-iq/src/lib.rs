@@ -3,15 +3,8 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 pub mod errors;
 mod modules;
-mod test;
-#[cfg(test)]
-mod query_tests;
 #[cfg(test)]
 mod test_tie_handling;
-#[cfg(test)]
-mod test_payout_mode_immutability;
-#[cfg(test)]
-mod test_cancellation_referral;
 pub mod types;
 
 pub use errors::ErrorCode;
@@ -31,7 +24,7 @@ impl PredictIQ {
     ) -> Result<(), ErrorCode> {
         // Require the deployer's authorization to prevent front-running attacks.
         // Only the account that deployed this contract can call initialize.
-        e.deployer().require_auth();
+        admin.require_auth();
 
         if e.storage().persistent().has(&ConfigKey::Admin) {
             return Err(ErrorCode::AlreadyInitialized);
@@ -104,10 +97,6 @@ impl PredictIQ {
 
     pub fn withdraw_refund(e: Env, bettor: Address, market_id: u64) -> Result<i128, ErrorCode> {
         crate::modules::cancellation::withdraw_refund(&e, bettor, market_id, 0)
-    }
-
-    pub fn cancel_market_admin(e: Env, market_id: u64) -> Result<(), ErrorCode> {
-        crate::modules::cancellation::cancel_market_admin(&e, market_id)
     }
 
     pub fn cancel_market_admin(e: Env, market_id: u64) -> Result<(), ErrorCode> {

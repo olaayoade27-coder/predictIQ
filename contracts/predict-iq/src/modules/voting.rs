@@ -2,7 +2,6 @@ use crate::errors::ErrorCode;
 use crate::modules::markets;
 use crate::types::{ConfigKey, LockedTokens, MarketStatus, Vote};
 use soroban_sdk::{contracttype, token, Address, Env, Symbol, Val};
-use soroban_sdk::{contracttype, token, Address, Env, Symbol};
 
 #[contracttype]
 #[derive(Clone)]

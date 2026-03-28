@@ -105,7 +105,7 @@ pub fn require_closed(e: &Env) -> Result<(), ErrorCode> {
 pub fn pause(e: &Env) -> Result<(), ErrorCode> {
     // Try guardian first; fall back to admin
     let guardian_ok = admin::get_guardian(e)
-        .map(|g| g.try_require_auth().is_ok())
+        .map(|g| { g.require_auth(); true })
         .unwrap_or(false);
 
     if !guardian_ok {
@@ -117,7 +117,7 @@ pub fn pause(e: &Env) -> Result<(), ErrorCode> {
 
 pub fn unpause(e: &Env) -> Result<(), ErrorCode> {
     let guardian_ok = admin::get_guardian(e)
-        .map(|g| g.try_require_auth().is_ok())
+        .map(|g| { g.require_auth(); true })
         .unwrap_or(false);
 
     if !guardian_ok {
