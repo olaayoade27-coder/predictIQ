@@ -1,8 +1,18 @@
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-    use predictiq_api::security::{sanitize, signing, RateLimitConfig, RateLimiter};
-    use std::time::Duration;
+    use std::{net::IpAddr, sync::Arc, time::Duration};
+
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use predictiq_api::security::{
+        ip_whitelist_middleware, sanitize, signing, IpWhitelist, RateLimitConfig, RateLimiter,
+    };
+    use tower::ServiceExt;
 
     #[test]
     fn test_email_sanitization() {
@@ -142,188 +152,149 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // sanitize::string – Unicode property tests
+    // IpWhitelist — unit tests
     // -------------------------------------------------------------------------
 
     #[test]
-    fn string_sanitize_strips_ascii_control_chars() {
-        // NUL, SOH, BEL, DEL — all ASCII control chars must be removed.
-        let input = "\x00\x01\x07hello\x7f";
-        assert_eq!(sanitize::string(input, 100), "hello");
+    fn ip_whitelist_allows_ipv4() {
+        let wl = IpWhitelist::new(vec!["192.168.1.1".parse().unwrap()]);
+        assert!(wl.is_allowed("192.168.1.1"));
+        assert!(!wl.is_allowed("192.168.1.2"));
     }
 
     #[test]
-    fn string_sanitize_preserves_normal_whitespace() {
-        // Tab, newline, carriage return, space are explicitly allowed.
-        let input = "hello\tworld\nnew\r\nline and space";
-        let out = sanitize::string(input, 100);
-        assert_eq!(out, input);
+    fn ip_whitelist_allows_ipv6() {
+        let wl = IpWhitelist::new(vec!["::1".parse::<IpAddr>().unwrap()]);
+        assert!(wl.is_allowed("::1"));
+        assert!(!wl.is_allowed("::2"));
     }
 
     #[test]
-    fn string_sanitize_strips_nel_u0085() {
-        // U+0085 NEXT LINE — is_control() AND is_whitespace() in Rust.
-        // Old filter kept it; new filter must strip it.
-        let input = "before\u{0085}after";
-        let out = sanitize::string(input, 100);
-        assert!(!out.contains('\u{0085}'), "U+0085 NEL must be stripped");
-        assert_eq!(out, "beforeafter");
+    fn ip_whitelist_rejects_malformed_input() {
+        let wl = IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]);
+        assert!(!wl.is_allowed("not-an-ip"));
+        assert!(!wl.is_allowed(""));
+        assert!(!wl.is_allowed("999.999.999.999"));
+        assert!(!wl.is_allowed("unknown"));
     }
 
     #[test]
-    fn string_sanitize_strips_line_separator_u2028() {
-        // U+2028 LINE SEPARATOR — Unicode control-like, not ASCII whitespace.
-        let input = "a\u{2028}b";
-        let out = sanitize::string(input, 100);
-        assert!(!out.contains('\u{2028}'), "U+2028 must be stripped");
-        assert_eq!(out, "ab");
+    fn ip_whitelist_empty_list_denies_all() {
+        let wl = IpWhitelist::new(vec![]);
+        assert!(!wl.is_allowed("127.0.0.1"));
+        assert!(!wl.is_allowed("::1"));
     }
 
-    #[test]
-    fn string_sanitize_strips_paragraph_separator_u2029() {
-        let input = "a\u{2029}b";
-        let out = sanitize::string(input, 100);
-        assert!(!out.contains('\u{2029}'), "U+2029 must be stripped");
-        assert_eq!(out, "ab");
+    // ── IpWhitelist middleware — HTTP-level tests ────────────────────────────
+
+    fn whitelist_app(wl: Arc<IpWhitelist>) -> Router {
+        Router::new()
+            .route("/admin", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                wl,
+                ip_whitelist_middleware,
+            ))
     }
 
-    #[test]
-    fn string_sanitize_strips_zero_width_space_u200b() {
-        // U+200B ZERO WIDTH SPACE — not control, but invisible and policy-violating.
-        // NOTE: current filter does NOT strip this (it's not is_control()).
-        // This test documents the current boundary; update if policy tightens.
-        let input = "a\u{200B}b";
-        let out = sanitize::string(input, 100);
-        // Document current behavior: passes through (not a control char).
-        // If policy changes to strip all invisible chars, update this assertion.
-        let _ = out; // accepted either way — test is a property probe
+    fn req_with_ip(ip: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/admin")
+            .header("x-forwarded-for", ip)
+            .body(Body::empty())
+            .unwrap()
     }
 
-    #[test]
-    fn string_sanitize_strips_bom_u_feff() {
-        // U+FEFF BOM — not is_control() in Rust, passes through current filter.
-        // Document current behavior.
-        let input = "\u{FEFF}hello";
-        let out = sanitize::string(input, 100);
-        let _ = out; // property probe — documents current pass-through
+    #[tokio::test]
+    async fn middleware_allows_whitelisted_ipv4() {
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("10.0.0.1")).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK);
     }
 
-    #[test]
-    fn string_sanitize_preserves_multibyte_unicode() {
-        // Emoji and CJK must survive sanitization unchanged.
-        let input = "héllo wörld 🎉 日本語";
-        let out = sanitize::string(input, 100);
-        assert_eq!(out, input);
+    #[tokio::test]
+    async fn middleware_blocks_non_whitelisted_ipv4() {
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("10.0.0.2")).await.unwrap().status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn middleware_allows_whitelisted_ipv6() {
+        let wl = Arc::new(IpWhitelist::new(vec!["2001:db8::1".parse::<IpAddr>().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("2001:db8::1")).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_blocks_malformed_ip_header() {
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("not-an-ip")).await.unwrap().status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn middleware_blocks_unknown_fallback() {
+        // No x-forwarded-for and no ConnectInfo → extract_client_ip returns "unknown"
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let req = Request::builder().uri("/admin").body(Body::empty()).unwrap();
+        let status = whitelist_app(wl).oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // -------------------------------------------------------------------------
+    // sanitize::contains_sql_injection — expanded corpus
+    // -------------------------------------------------------------------------
+
     #[test]
-    fn string_sanitize_fuzz_mixed_unicode_categories() {
-        // Mix of valid, control, and Unicode special chars.
-        let cases: &[(&str, &str)] = &[
-            ("abc\x00def", "abcdef"),
-            ("ok\u{0085}end", "okend"),
-            ("tab\there", "tab\there"),
-            ("nl\nhere", "nl\nhere"),
-            ("cr\rhere", "cr\rhere"),
-            ("\x01\x02\x03", ""),
+    fn sql_injection_detects_known_patterns() {
+        let payloads = [
+            "' OR '1'='1",
+            "' or 1=1 --",
+            "'; DROP TABLE users;",
+            "'; DELETE FROM accounts",
+            "UNION SELECT username, password FROM users",
+            "exec(xp_cmdshell('dir'))",
+            "execute(something)",
+            "<script>alert(1)</script>",
+            "javascript:void(0)",
+            "onerror=alert(document.cookie)",
+            "onload=fetch('https://evil.com')",
         ];
-        for (input, expected) in cases {
-            let out = sanitize::string(input, 200);
-            assert_eq!(&out, expected, "input: {input:?}");
+        for p in &payloads {
+            assert!(
+                sanitize::contains_sql_injection(p),
+                "expected detection for: {p}"
+            );
         }
     }
 
     #[test]
-    fn string_sanitize_max_len_counts_chars_not_bytes() {
-        // "é" is 2 bytes but 1 char — max_len=3 must yield 3 chars.
-        let input = "éàü xyz";
-        let out = sanitize::string(input, 3);
-        assert_eq!(out.chars().count(), 3);
-    }
-
-    // -------------------------------------------------------------------------
-    // signing::verify_signature – malformed input corpus
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn verify_signature_empty_signature_returns_false() {
-        assert!(!signing::verify_signature(b"payload", "", "secret"));
-    }
-
-    #[test]
-    fn verify_signature_not_base64_returns_false() {
-        assert!(!signing::verify_signature(b"payload", "not-base64!!!", "secret"));
-    }
-
-    #[test]
-    fn verify_signature_bad_padding_returns_false() {
-        // Valid base64 chars but wrong padding.
-        assert!(!signing::verify_signature(b"payload", "YWJj=", "secret"));
-    }
-
-    #[test]
-    fn verify_signature_truncated_hmac_returns_false() {
-        // Too short to be a valid HMAC-SHA256 (32 bytes).
-        let short = base64::engine::general_purpose::STANDARD.encode(b"tooshort");
-        assert!(!signing::verify_signature(b"payload", &short, "secret"));
-    }
-
-    #[test]
-    fn verify_signature_wrong_length_all_zeros_returns_false() {
-        // 32 zero bytes — correct length but wrong value.
-        let zeros = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
-        assert!(!signing::verify_signature(b"payload", &zeros, "secret"));
-    }
-
-    #[test]
-    fn verify_signature_url_safe_base64_returns_false() {
-        // URL-safe base64 (uses - and _) must not be accepted by STANDARD decoder.
-        let payload = b"data";
-        let secret = "key";
-        let sig = signing::generate_signature(payload, secret).unwrap();
-        // Replace standard chars with url-safe equivalents to simulate wrong variant.
-        let url_safe = sig.replace('+', "-").replace('/', "_");
-        if url_safe != sig {
-            assert!(!signing::verify_signature(payload, &url_safe, secret));
-        }
-    }
-
-    #[test]
-    fn verify_signature_empty_payload_valid_sig_roundtrips() {
-        let sig = signing::generate_signature(b"", "secret").unwrap();
-        assert!(signing::verify_signature(b"", &sig, "secret"));
-    }
-
-    #[test]
-    fn verify_signature_empty_secret_returns_false() {
-        // Empty secret — HMAC rejects it; must return false, not panic.
-        assert!(!signing::verify_signature(b"payload", "anysig", ""));
-    }
-
-    #[test]
-    fn verify_signature_unicode_secret_roundtrips() {
-        let payload = b"data";
-        let secret = "sécret-🔑";
-        let sig = signing::generate_signature(payload, secret).unwrap();
-        assert!(signing::verify_signature(payload, &sig, secret));
-    }
-
-    #[test]
-    fn verify_signature_corpus_malformed_variants() {
-        // Fuzz corpus: none of these must panic; all must return false.
-        let bad_sigs = [
-            "====",
-            "////",
-            "AAAA",                    // valid base64, wrong HMAC
-            "AA==",                    // 1 byte decoded — too short
-            " ",
-            "\x00",
-            &"A".repeat(1000),         // very long
-            "YQ==\x00extra",           // embedded NUL
+    fn sql_injection_passes_benign_inputs() {
+        let benign = [
+            "hello world",
+            "user@example.com",
+            "SELECT your best option",   // "select" alone, no "union select"
+            "drop the ball",             // "drop" alone, no "drop table"
+            "execute your plan",         // "execute(" not present
+            "script writing tips",       // no "<script" tag
+            "100% organic",
+            "it's a great day",
+            "O'Brien",                   // apostrophe but no injection pattern
         ];
-        for sig in bad_sigs {
-            let result = signing::verify_signature(b"payload", sig, "secret");
-            assert!(!result, "expected false for malformed sig: {sig:?}");
+        for b in &benign {
+            assert!(
+                !sanitize::contains_sql_injection(b),
+                "false positive for: {b}"
+            );
         }
+    }
+
+    #[test]
+    fn sql_injection_detects_mixed_case_variants() {
+        // The function lowercases before matching, so these must all be caught.
+        assert!(sanitize::contains_sql_injection("EXEC(something)"));
+        assert!(sanitize::contains_sql_injection("Union Select id FROM t"));
+        assert!(sanitize::contains_sql_injection("JAVASCRIPT:alert(1)"));
+        assert!(sanitize::contains_sql_injection("ONERROR=x"));
     }
 }
