@@ -182,13 +182,24 @@ pub async fn run() -> anyhow::Result<()> {
             "/api/v1/email/queue/stats",
             get(handlers::email_queue_stats),
         )
+        .layer(TraceLayer::new_for_http())
+        .with_state(state.clone());
+
+    // Webhook routes use provider-signed auth (SendGrid HMAC), not admin API keys.
+    let webhook_secret = state.config.sendgrid_webhook_secret.clone();
+    let webhook_routes = Router::new()
         .route("/webhooks/sendgrid", post(handlers::sendgrid_webhook))
+        .layer(middleware::from_fn_with_state(
+            webhook_secret,
+            security::sendgrid_webhook_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
     let app = public_routes
         .merge(newsletter_routes)
         .merge(admin_routes)
+        .merge(webhook_routes)
         .layer(cors);
 
     let listener = TcpListener::bind(bind_addr).await?;

@@ -928,4 +928,178 @@ mod tests {
         let rendered = metrics.render().unwrap();
         assert!(rendered.contains("rpc_errors_total{method=\"getEvents\"} 1"));
     }
+
+    // -------------------------------------------------------------------------
+    // sync cursor progression under empty event streams
+    //
+    // fetch_events_since silently returns Ok(vec![]) on RPC failure.
+    // These tests verify the cursor never jumps or rewinds in that scenario.
+    // -------------------------------------------------------------------------
+
+    /// Build a client whose RPC endpoint is unreachable (port 0), so every RPC
+    /// call fails immediately.  Returns None when Redis is unavailable so each
+    /// test can skip gracefully without failing CI.
+    async fn make_dead_rpc_client() -> Option<BlockchainClient> {
+        let mut config = Config::from_env();
+        config.blockchain_rpc_url = "http://127.0.0.1:0".to_string();
+        config.retry_attempts = 1;
+        config.retry_base_delay_ms = 1;
+        // Small lag keeps confirmed_tip arithmetic predictable.
+        config.confirmation_ledger_lag = 5;
+        // No market IDs avoids extra RPC calls inside sync_once.
+        config.sync_market_ids = vec![];
+
+        let metrics = Metrics::new().unwrap();
+        let cache = match RedisCache::new(&config.redis_url).await {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
+        Some(BlockchainClient::new(&config, cache, metrics).unwrap())
+    }
+
+    /// When latest_ledger RPC fails, sync_once falls back to cursor_ledger as
+    /// the latest value.  confirmed_tip = cursor - lag ≤ cursor, so the
+    /// early-return guard fires and the cursor is returned unchanged.
+    #[tokio::test]
+    async fn test_cursor_does_not_advance_when_latest_ledger_rpc_fails() {
+        let client = match make_dead_rpc_client().await {
+            Some(c) => c,
+            None => {
+                println!("Skipping test_cursor_does_not_advance_when_latest_ledger_rpc_fails: Redis unavailable");
+                return;
+            }
+        };
+
+        let initial: u32 = 500;
+        let next = client.sync_once(initial).await.unwrap();
+        assert_eq!(
+            next, initial,
+            "cursor must not change when latest_ledger RPC fails (got {next}, want {initial})"
+        );
+    }
+
+    /// Starting from ledger 0 (fresh worker state) with a dead RPC the cursor
+    /// must stay at 0 and must not jump to any non-zero value.
+    #[tokio::test]
+    async fn test_cursor_stays_at_zero_on_rpc_failure_from_fresh_state() {
+        let client = match make_dead_rpc_client().await {
+            Some(c) => c,
+            None => {
+                println!("Skipping test_cursor_stays_at_zero_on_rpc_failure_from_fresh_state: Redis unavailable");
+                return;
+            }
+        };
+
+        let next = client.sync_once(0).await.unwrap();
+        assert_eq!(
+            next, 0,
+            "cursor must stay at 0 when RPC fails from fresh state (got {next})"
+        );
+    }
+
+    /// When confirmed_tip ≤ cursor (chain has not advanced past the lag window),
+    /// sync_once must return the cursor unchanged – idempotency guarantee.
+    #[tokio::test]
+    async fn test_cursor_is_idempotent_when_already_at_confirmed_tip() {
+        let client = match make_dead_rpc_client().await {
+            Some(c) => c,
+            None => {
+                println!("Skipping test_cursor_is_idempotent_when_already_at_confirmed_tip: Redis unavailable");
+                return;
+            }
+        };
+
+        // Dead RPC → latest falls back to cursor_ledger.
+        // confirmed_tip = cursor - lag ≤ cursor → early return.
+        let cursor: u32 = 200;
+        let next = client.sync_once(cursor).await.unwrap();
+        assert_eq!(
+            next, cursor,
+            "cursor must be idempotent when already at confirmed tip (got {next}, want {cursor})"
+        );
+    }
+
+    /// Across multiple consecutive sync cycles with a dead RPC the cursor must
+    /// never rewind below its starting value.  Guards against any regression
+    /// where a silent empty response causes the cursor to go backwards.
+    #[tokio::test]
+    async fn test_cursor_never_rewinds_across_multiple_empty_sync_cycles() {
+        let client = match make_dead_rpc_client().await {
+            Some(c) => c,
+            None => {
+                println!("Skipping test_cursor_never_rewinds_across_multiple_empty_sync_cycles: Redis unavailable");
+                return;
+            }
+        };
+
+        let initial: u32 = 1_000;
+        let mut cursor = initial;
+
+        for round in 0..5u32 {
+            let next = client.sync_once(cursor).await.unwrap();
+            assert!(
+                next >= initial,
+                "cursor rewound on round {round}: started at {initial}, became {next}"
+            );
+            cursor = next;
+        }
+    }
+
+    /// fetch_events_since must return Ok(vec![]) – not an error – when the RPC
+    /// is unreachable, and the silent fallback must be recorded in the
+    /// rpc_errors_total metric so operators can detect the failure.
+    #[tokio::test]
+    async fn test_empty_event_stream_on_rpc_failure_is_recorded_in_metrics() {
+        let mut config = Config::from_env();
+        config.blockchain_rpc_url = "http://127.0.0.1:0".to_string();
+        config.retry_attempts = 1;
+        config.retry_base_delay_ms = 1;
+        config.sync_market_ids = vec![];
+
+        let metrics = Metrics::new().unwrap();
+        let cache = match RedisCache::new(&config.redis_url).await {
+            Ok(c) => c,
+            Err(_) => {
+                println!("Skipping test_empty_event_stream_on_rpc_failure_is_recorded_in_metrics: Redis unavailable");
+                return;
+            }
+        };
+
+        let client = BlockchainClient::new(&config, cache, metrics.clone()).unwrap();
+
+        // RPC failure must be masked – the call must succeed with an empty list.
+        let events = client.fetch_events_since(100).await.unwrap();
+        assert!(
+            events.is_empty(),
+            "RPC failure must produce an empty event list, not propagate an error"
+        );
+
+        // The silent fallback must be observable via metrics.
+        let rendered = metrics.render().unwrap();
+        assert!(
+            rendered.contains("rpc_errors_total{method=\"getEvents\"} 1"),
+            "silent empty-stream fallback must increment rpc_errors_total for getEvents"
+        );
+    }
+
+    /// sync_once must return Ok (not Err) when the RPC is unreachable, so the
+    /// run_sync_worker loop takes the Ok branch and preserves the cursor.
+    #[tokio::test]
+    async fn test_sync_once_returns_ok_not_err_on_rpc_failure() {
+        let client = match make_dead_rpc_client().await {
+            Some(c) => c,
+            None => {
+                println!(
+                    "Skipping test_sync_once_returns_ok_not_err_on_rpc_failure: Redis unavailable"
+                );
+                return;
+            }
+        };
+
+        let result = client.sync_once(300).await;
+        assert!(
+            result.is_ok(),
+            "sync_once must return Ok on RPC failure so the worker loop preserves the cursor"
+        );
+    }
 }

@@ -47,6 +47,7 @@ pub struct Config {
     pub api_keys: Vec<String>,
     pub admin_whitelist_ips: Vec<IpAddr>,
     pub request_signing_secret: Option<String>,
+    pub sendgrid_webhook_secret: Option<String>,
 }
 
 impl Config {
@@ -138,6 +139,7 @@ impl Config {
                 })
                 .unwrap_or_default(),
             request_signing_secret: env::var("REQUEST_SIGNING_SECRET").ok(),
+            sendgrid_webhook_secret: env::var("SENDGRID_WEBHOOK_SECRET").ok(),
         }
     }
 

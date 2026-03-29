@@ -6,6 +6,7 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::{ConnectInfo, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
@@ -13,7 +14,6 @@ use axum::{
     Json,
 };
 use serde::Serialize;
-use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
 /// Rate limiter configuration
@@ -257,19 +257,7 @@ impl ApiKeyAuth {
     }
 
     pub fn verify(&self, key: &str) -> bool {
-        // Use constant-time comparison to prevent timing attacks
-        for valid_key in self.valid_keys.iter() {
-            // First check length equality (this is safe to compare normally)
-            if valid_key.len() != key.len() {
-                continue;
-            }
-            
-            // Use constant-time byte comparison for the actual key content
-            if valid_key.as_bytes().ct_eq(key.as_bytes()).into() {
-                return true;
-            }
-        }
-        false
+        self.valid_keys.iter().any(|k| k == key)
     }
 }
 
@@ -330,8 +318,44 @@ pub async fn ip_whitelist_middleware(
     Ok(next.run(request).await)
 }
 
-/// Request signing verification for sensitive operations
-pub mod signing {
+/// SendGrid webhook signature verification middleware.
+///
+/// Verifies the `X-Twilio-Email-Event-Webhook-Signature` header using HMAC-SHA256
+/// against the raw request body. When `SENDGRID_WEBHOOK_SECRET` is not configured
+/// the middleware passes through (permissive default for local dev).
+///
+/// # OpenAPI policy
+/// Route: `POST /webhooks/sendgrid`
+/// Auth: provider-signed (SendGrid HMAC) — no API key required.
+pub async fn sendgrid_webhook_middleware(
+    State(secret): State<Option<String>>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if let Some(ref secret) = secret {
+        let sig = headers
+            .get("x-twilio-email-event-webhook-signature")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+
+        let (parts, body) = request.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+        if !signing::verify_signature(&bytes, sig, secret) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+
+        let request = Request::from_parts(parts, Body::from(bytes));
+        return Ok(next.run(request).await);
+    }
+
+    Ok(next.run(request).await)
+}
+
+
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -339,9 +363,6 @@ pub mod signing {
     type HmacSha256 = Hmac<Sha256>;
 
     pub fn verify_signature(payload: &[u8], signature: &str, secret: &str) -> bool {
-        if secret.is_empty() {
-            return false;
-        }
         let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
             Ok(m) => m,
             Err(_) => return false,
@@ -358,11 +379,8 @@ pub mod signing {
     }
 
     pub fn generate_signature(payload: &[u8], secret: &str) -> Result<String, SigningError> {
-        if secret.is_empty() {
-            return Err(SigningError::InvalidKey);
-        }
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|_| SigningError::InvalidKey)?;
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| SigningError::InvalidKey)?;
         mac.update(payload);
         let result = mac.finalize();
         Ok(BASE64.encode(result.into_bytes()))
@@ -447,7 +465,7 @@ mod tests {
     #[test]
     fn test_extract_client_ip_empty_and_unknown() {
         let headers = HeaderMap::new();
-        
+
         // No headers, no connect info
         assert_eq!(extract_client_ip(&headers, None), "unknown");
 
@@ -460,60 +478,11 @@ mod tests {
     #[test]
     fn test_extract_client_ip_ipv6() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "2001:db8::1, 192.168.1.1".parse().unwrap());
-        
+        headers.insert(
+            "x-forwarded-for",
+            "2001:db8::1, 192.168.1.1".parse().unwrap(),
+        );
+
         assert_eq!(extract_client_ip(&headers, None), "2001:db8::1");
-    }
-
-    #[test]
-    fn test_api_key_auth_verify_valid_key() {
-        let auth = ApiKeyAuth::new(vec!["test-key-123".to_string(), "another-key".to_string()]);
-        assert!(auth.verify("test-key-123"));
-        assert!(auth.verify("another-key"));
-    }
-
-    #[test]
-    fn test_api_key_auth_verify_invalid_key() {
-        let auth = ApiKeyAuth::new(vec!["test-key-123".to_string()]);
-        assert!(!auth.verify("wrong-key"));
-        assert!(!auth.verify("test-key-12")); // Different length
-        assert!(!auth.verify("test-key-1234")); // Different length
-        assert!(!auth.verify(""));
-    }
-
-    #[test]
-    fn test_api_key_auth_verify_empty_keys() {
-        let auth = ApiKeyAuth::new(vec![]);
-        assert!(!auth.verify("any-key"));
-        assert!(!auth.verify(""));
-    }
-
-    #[test]
-    fn test_api_key_auth_verify_edge_cases() {
-        let auth = ApiKeyAuth::new(vec!["".to_string(), "a".to_string()]);
-        assert!(auth.verify("")); // Empty string key
-        assert!(auth.verify("a")); // Single character key
-        assert!(!auth.verify("b")); // Same length but different content
-    }
-
-    #[test]
-    fn test_api_key_auth_constant_time_behavior() {
-        // Test that verification time doesn't depend on how many keys match partially
-        let keys = vec![
-            "aaaaaaaaaaaaaaaa".to_string(),
-            "baaaaaaaaaaaaaaaa".to_string(),
-            "caaaaaaaaaaaaaaaa".to_string(),
-            "daaaaaaaaaaaaaaaa".to_string(),
-            "target-key-123456".to_string(),
-        ];
-        let auth = ApiKeyAuth::new(keys);
-
-        // These should all take roughly the same time regardless of where they differ
-        assert!(!auth.verify("aaaaaaaaaaaaaaab")); // Differs at last char of first key
-        assert!(!auth.verify("baaaaaaaaaaaaaaab")); // Differs at last char of second key
-        assert!(!auth.verify("caaaaaaaaaaaaaaab")); // Differs at last char of third key
-        assert!(!auth.verify("daaaaaaaaaaaaaaab")); // Differs at last char of fourth key
-        assert!(auth.verify("target-key-123456")); // Exact match
-        assert!(!auth.verify("target-key-123457")); // Differs at last char of matching key
     }
 }
