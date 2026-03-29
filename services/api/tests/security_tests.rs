@@ -1,7 +1,18 @@
 #[cfg(test)]
 mod tests {
-    use predictiq_api::security::{sanitize, signing, RateLimitConfig, RateLimiter};
-    use std::time::Duration;
+    use std::{net::IpAddr, sync::Arc, time::Duration};
+
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use predictiq_api::security::{
+        ip_whitelist_middleware, sanitize, signing, IpWhitelist, RateLimitConfig, RateLimiter,
+    };
+    use tower::ServiceExt;
 
     #[test]
     fn test_email_sanitization() {
@@ -138,5 +149,152 @@ mod tests {
         // Ensure the error can be formatted without panicking (used in logs/responses).
         let err = signing::SigningError::InvalidKey;
         assert!(!err.to_string().is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // IpWhitelist — unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn ip_whitelist_allows_ipv4() {
+        let wl = IpWhitelist::new(vec!["192.168.1.1".parse().unwrap()]);
+        assert!(wl.is_allowed("192.168.1.1"));
+        assert!(!wl.is_allowed("192.168.1.2"));
+    }
+
+    #[test]
+    fn ip_whitelist_allows_ipv6() {
+        let wl = IpWhitelist::new(vec!["::1".parse::<IpAddr>().unwrap()]);
+        assert!(wl.is_allowed("::1"));
+        assert!(!wl.is_allowed("::2"));
+    }
+
+    #[test]
+    fn ip_whitelist_rejects_malformed_input() {
+        let wl = IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]);
+        assert!(!wl.is_allowed("not-an-ip"));
+        assert!(!wl.is_allowed(""));
+        assert!(!wl.is_allowed("999.999.999.999"));
+        assert!(!wl.is_allowed("unknown"));
+    }
+
+    #[test]
+    fn ip_whitelist_empty_list_denies_all() {
+        let wl = IpWhitelist::new(vec![]);
+        assert!(!wl.is_allowed("127.0.0.1"));
+        assert!(!wl.is_allowed("::1"));
+    }
+
+    // ── IpWhitelist middleware — HTTP-level tests ────────────────────────────
+
+    fn whitelist_app(wl: Arc<IpWhitelist>) -> Router {
+        Router::new()
+            .route("/admin", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                wl,
+                ip_whitelist_middleware,
+            ))
+    }
+
+    fn req_with_ip(ip: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/admin")
+            .header("x-forwarded-for", ip)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn middleware_allows_whitelisted_ipv4() {
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("10.0.0.1")).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_blocks_non_whitelisted_ipv4() {
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("10.0.0.2")).await.unwrap().status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn middleware_allows_whitelisted_ipv6() {
+        let wl = Arc::new(IpWhitelist::new(vec!["2001:db8::1".parse::<IpAddr>().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("2001:db8::1")).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_blocks_malformed_ip_header() {
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let status = whitelist_app(wl).oneshot(req_with_ip("not-an-ip")).await.unwrap().status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn middleware_blocks_unknown_fallback() {
+        // No x-forwarded-for and no ConnectInfo → extract_client_ip returns "unknown"
+        let wl = Arc::new(IpWhitelist::new(vec!["10.0.0.1".parse().unwrap()]));
+        let req = Request::builder().uri("/admin").body(Body::empty()).unwrap();
+        let status = whitelist_app(wl).oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // -------------------------------------------------------------------------
+    // sanitize::contains_sql_injection — expanded corpus
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn sql_injection_detects_known_patterns() {
+        let payloads = [
+            "' OR '1'='1",
+            "' or 1=1 --",
+            "'; DROP TABLE users;",
+            "'; DELETE FROM accounts",
+            "UNION SELECT username, password FROM users",
+            "exec(xp_cmdshell('dir'))",
+            "execute(something)",
+            "<script>alert(1)</script>",
+            "javascript:void(0)",
+            "onerror=alert(document.cookie)",
+            "onload=fetch('https://evil.com')",
+        ];
+        for p in &payloads {
+            assert!(
+                sanitize::contains_sql_injection(p),
+                "expected detection for: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_injection_passes_benign_inputs() {
+        let benign = [
+            "hello world",
+            "user@example.com",
+            "SELECT your best option",   // "select" alone, no "union select"
+            "drop the ball",             // "drop" alone, no "drop table"
+            "execute your plan",         // "execute(" not present
+            "script writing tips",       // no "<script" tag
+            "100% organic",
+            "it's a great day",
+            "O'Brien",                   // apostrophe but no injection pattern
+        ];
+        for b in &benign {
+            assert!(
+                !sanitize::contains_sql_injection(b),
+                "false positive for: {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_injection_detects_mixed_case_variants() {
+        // The function lowercases before matching, so these must all be caught.
+        assert!(sanitize::contains_sql_injection("EXEC(something)"));
+        assert!(sanitize::contains_sql_injection("Union Select id FROM t"));
+        assert!(sanitize::contains_sql_injection("JAVASCRIPT:alert(1)"));
+        assert!(sanitize::contains_sql_injection("ONERROR=x"));
     }
 }
